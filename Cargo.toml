@@ -1,0 +1,12 @@
+[package]
+name = "antrs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitflags = "2.4.0"
+hex = "0.4.3"
+num_enum = "0.7.0"
+rusb = "0.9.3"
