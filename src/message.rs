@@ -11,10 +11,13 @@ pub enum MessageID {
 
     ChannelResponseEvent = 0x40,
     AssignChannel = 0x42,
+    SetChannelPeriod = 0x43,
     SetChannelRFFrequency = 0x45,
     SetNetworkKey = 0x46,
     ResetSystem = 0x4a,
     OpenChannel = 0x4b,
+    CloseChannel = 0x4c,
+    RequestMessage = 0x4d,
     BroadcastData = 0x4e,
     SetChannelID = 0x51,
     StartupMessage = 0x6f,
@@ -84,7 +87,7 @@ pub enum ChannelType {
 }
 
 bitflags! {
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct ChannelExtendedAssignment : u8 {
         const BACKGROUND_SCANNING = 0x01;
         const FREQUENCY_AGILITY = 0x04;
@@ -93,7 +96,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AssignChannelData {
     pub channel: u8,
     pub channel_type: ChannelType,
@@ -115,7 +118,7 @@ impl AssignChannelData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BroadcastDataData {
     channel: u8,
     data: [u8; 8],
@@ -140,7 +143,7 @@ impl BroadcastDataData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelResponseEventData {
     pub channel: u8,
     pub message_id: MessageID,
@@ -160,7 +163,18 @@ impl ChannelResponseEventData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CloseChannelData {
+    pub channel: u8,
+}
+
+impl CloseChannelData {
+    fn encode(&self) -> Vec<u8> {
+        vec![SYNC, 1, MessageID::CloseChannel.into(), self.channel]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OpenChannelData {
     pub channel: u8,
 }
@@ -168,6 +182,24 @@ pub struct OpenChannelData {
 impl OpenChannelData {
     fn encode(&self) -> Vec<u8> {
         vec![SYNC, 1, MessageID::OpenChannel.into(), self.channel]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RequestMessageData {
+    pub channel: u8,
+    pub message_id: MessageID,
+}
+
+impl RequestMessageData {
+    fn encode(&self) -> Vec<u8> {
+        vec![
+            SYNC,
+            2,
+            MessageID::RequestMessage.into(),
+            self.channel,
+            self.message_id.into(),
+        ]
     }
 }
 
@@ -180,7 +212,7 @@ impl ResetSystem {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SetChannelIDData {
     pub channel: u8,
     pub device: u16,
@@ -209,7 +241,28 @@ impl SetChannelIDData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetChannelPeriodData {
+    pub channel: u8,
+    pub period: u16,
+}
+
+impl SetChannelPeriodData {
+    fn encode(&self) -> Vec<u8> {
+        let period_hi: u8 = ((self.period & 0xff00) >> 8).try_into().unwrap();
+        let period_lo: u8 = (self.period & 0xff).try_into().unwrap();
+        vec![
+            SYNC,
+            3,
+            MessageID::SetChannelPeriod.into(),
+            self.channel,
+            period_lo,
+            period_hi,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SetChannelRFFrequencyData {
     pub channel: u8,
     pub frequency: u8,
@@ -227,7 +280,7 @@ impl SetChannelRFFrequencyData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SetNetworkKeyData {
     pub network: u8,
     pub key: [u8; 8],
@@ -252,7 +305,7 @@ impl SetNetworkKeyData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StartupMessageData {
     reason: u8,
 }
@@ -280,14 +333,17 @@ impl std::fmt::Display for Error {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Message {
     AssignChannel(AssignChannelData),
     BroadcastData(BroadcastDataData),
     ChannelResponseEvent(ChannelResponseEventData),
+    CloseChannel(CloseChannelData),
     OpenChannel(OpenChannelData),
+    RequestMessage(RequestMessageData),
     ResetSystem,
     SetChannelID(SetChannelIDData),
+    SetChannelPeriod(SetChannelPeriodData),
     SetChannelRFFrequency(SetChannelRFFrequencyData),
     SetNetworkKey(SetNetworkKeyData),
     StartupMessage(StartupMessageData),
@@ -304,10 +360,13 @@ impl Message {
         let mut encoded = match self {
             Message::AssignChannel(base) => base.encode(),
             Message::BroadcastData(base) => base.encode(),
-            Message::OpenChannel(base) => base.encode(),
-            Message::ResetSystem => ResetSystem {}.encode(),
             Message::ChannelResponseEvent(base) => base.encode(),
+            Message::CloseChannel(base) => base.encode(),
+            Message::OpenChannel(base) => base.encode(),
+            Message::RequestMessage(base) => base.encode(),
+            Message::ResetSystem => ResetSystem {}.encode(),
             Message::SetChannelID(base) => base.encode(),
+            Message::SetChannelPeriod(base) => base.encode(),
             Message::SetChannelRFFrequency(base) => base.encode(),
             Message::SetNetworkKey(base) => base.encode(),
             Message::StartupMessage(base) => base.encode(),
@@ -385,7 +444,7 @@ impl Message {
                     Err(_) => return Err(Error::InvalidMessageID(data[4])),
                 };
                 let message_code: MessageCode = match data[5].try_into() {
-                    Ok(id) => id,
+                    Ok(code) => code,
                     Err(_) => return Err(Error::InvalidMessageCode(data[5])),
                 };
                 Ok(Message::ChannelResponseEvent(ChannelResponseEventData {
@@ -394,16 +453,23 @@ impl Message {
                     message_code,
                 }))
             }
+            MessageID::CloseChannel => {
+                Ok(Message::CloseChannel(CloseChannelData { channel: data[3] }))
+            }
             MessageID::OpenChannel => {
                 Ok(Message::OpenChannel(OpenChannelData { channel: data[3] }))
             }
-            MessageID::ResetSystem => Ok(Message::ResetSystem),
-            MessageID::SetChannelRFFrequency => {
-                Ok(Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
+            MessageID::RequestMessage => {
+                let message_id: MessageID = match data[4].try_into() {
+                    Ok(id) => id,
+                    Err(_) => return Err(Error::InvalidMessageID(data[4])),
+                };
+                Ok(Message::RequestMessage(RequestMessageData {
                     channel: data[3],
-                    frequency: data[4],
+                    message_id,
                 }))
             }
+            MessageID::ResetSystem => Ok(Message::ResetSystem),
             MessageID::SetChannelID => {
                 let device_lo: u16 = data[4].into();
                 let device_hi: u16 = data[5].into();
@@ -417,6 +483,22 @@ impl Message {
                     pairing,
                     device_type,
                     transmission_type: data[7],
+                }))
+            }
+            MessageID::SetChannelPeriod => {
+                let period_lo: u16 = data[4].into();
+                let period_hi: u16 = data[5].into();
+                let period = (period_hi << 8) + period_lo;
+
+                Ok(Message::SetChannelPeriod(SetChannelPeriodData {
+                    channel: data[3],
+                    period,
+                }))
+            }
+            MessageID::SetChannelRFFrequency => {
+                Ok(Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
+                    channel: data[3],
+                    frequency: data[4],
                 }))
             }
             MessageID::SetNetworkKey => {
@@ -438,11 +520,14 @@ impl Message {
     pub fn encoded_len(&self) -> usize {
         4 + match self {
             Message::AssignChannel(_) => 4,
-            Message::ResetSystem => 1,
             Message::BroadcastData(_) => 9,
             Message::ChannelResponseEvent(_) => 3,
+            Message::CloseChannel(_) => 1,
             Message::OpenChannel(_) => 1,
+            Message::RequestMessage(_) => 2,
+            Message::ResetSystem => 1,
             Message::SetChannelID(_) => 5,
+            Message::SetChannelPeriod(_) => 3,
             Message::SetChannelRFFrequency(_) => 2,
             Message::SetNetworkKey(_) => 9,
             Message::StartupMessage(_) => 1,
@@ -534,6 +619,27 @@ mod test {
     }
 
     #[test]
+    fn it_encodes_request_message() {
+        let message = Message::RequestMessage(RequestMessageData {
+            channel: 2,
+            message_id: MessageID::SetChannelID,
+        });
+        assert_eq!(message.encode(), vec![SYNC, 0x02, 0x4d, 0x02, 0x51, 0xb8])
+    }
+
+    #[test]
+    fn it_decodes_request_message() {
+        let data = [SYNC, 0x02, 0x4d, 0x02, 0x51, 0xb8];
+        assert_eq!(
+            Message::decode(&data),
+            Ok(Message::RequestMessage(RequestMessageData {
+                channel: 2,
+                message_id: MessageID::SetChannelID
+            }))
+        )
+    }
+
+    #[test]
     fn it_encodes_reset_system() {
         let message = Message::ResetSystem;
         assert_eq!(message.encode(), vec![SYNC, 1, 0x4a, 0, 0xef]);
@@ -571,6 +677,30 @@ mod test {
                 pairing: true,
                 device_type: 120,
                 transmission_type: 0,
+            }))
+        )
+    }
+
+    #[test]
+    fn it_encodes_set_channel_period() {
+        let message = Message::SetChannelPeriod(SetChannelPeriodData {
+            channel: 3,
+            period: 4070,
+        });
+        assert_eq!(
+            message.encode(),
+            vec![SYNC, 0x03, 0x43, 0x03, 0xe6, 0x0f, 0x0e]
+        )
+    }
+
+    #[test]
+    fn it_decodes_set_channel_period() {
+        let data = [SYNC, 0x03, 0x43, 0x03, 0xe6, 0x0f, 0x0e];
+        assert_eq!(
+            Message::decode(&data),
+            Ok(Message::SetChannelPeriod(SetChannelPeriodData {
+                channel: 3,
+                period: 4070,
             }))
         )
     }
