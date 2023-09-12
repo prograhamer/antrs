@@ -8,10 +8,17 @@ use crate::message;
 pub enum Error {
     DeviceNotFound,
     DeviceNotInitialized,
+    EndpointNotInitialized,
     HandleNotInitialized,
     EndpointNotFound,
     Timeout,
-    USBError(String),
+    USBError(rusb::Error),
+}
+
+impl From<rusb::Error> for Error {
+    fn from(value: rusb::Error) -> Self {
+        Error::USBError(value)
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -23,45 +30,52 @@ impl std::fmt::Display for Error {
 const DYNASTREAM_INNOVATIONS_VID: u16 = 0xfcf;
 const DI_ANT_M_STICK: u16 = 0x1009;
 
+#[derive(Clone, Copy)]
+struct Endpoint {
+    interface: u8,
+    address: u8,
+}
+
 pub struct Node {
     vendor_id: u16,
     product_id: u16,
     device: Option<rusb::Device<rusb::GlobalContext>>,
     handle: Arc<Mutex<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
-    in_ep_id: u8,
-    out_ep_id: u8,
+    in_ep: Option<Endpoint>,
+    out_ep: Option<Endpoint>,
 }
 
 impl Node {
     pub fn open(&mut self) -> Result<(), Error> {
         self.device = Some(self.find_device()?);
 
-        let (in_ep_id, out_ep_id) = self.find_endpoints()?;
-        self.in_ep_id = in_ep_id;
-        self.out_ep_id = out_ep_id;
+        let (in_ep, out_ep) = self.find_endpoints()?;
+        self.in_ep = Some(in_ep);
+        self.out_ep = Some(out_ep);
 
-        match self
+        let mut handle = self
             .device
             .clone()
             .ok_or(Error::DeviceNotInitialized)?
-            .open()
-        {
-            Ok(handle) => {
-                let mut h = self.handle.lock().unwrap();
-                *h = Some(handle);
-            }
-            Err(e) => return Err(Error::USBError(e.to_string())),
-        };
+            .open()?;
 
-        self.detach_kernel_drivers()?;
+        handle.set_auto_detach_kernel_driver(true)?;
+        handle.set_active_configuration(0)?;
+        handle.claim_interface(in_ep.interface)?;
+        if in_ep.interface != out_ep.interface {
+            handle.claim_interface(out_ep.interface)?;
+        }
+
+        let mut h = self.handle.lock().unwrap();
+        *h = Some(handle);
 
         Ok(())
     }
 
-    pub fn receive_messages(&self) -> mpsc::Receiver<message::Message> {
+    pub fn receive_messages(&self) -> Result<mpsc::Receiver<message::Message>, Error> {
         let (tx, rx) = mpsc::channel::<message::Message>();
         let handle_mutex = Arc::clone(&self.handle);
-        let endpoint_id = self.in_ep_id;
+        let endpoint_id = self.in_ep.ok_or(Error::EndpointNotInitialized)?;
 
         thread::Builder::new()
             .name(String::from("node message read loop"))
@@ -78,7 +92,7 @@ impl Node {
                         let handle = guard.as_mut().expect("no handle");
 
                         read_size = match handle.read_bulk(
-                            endpoint_id,
+                            endpoint_id.address,
                             &mut buf[write_index..],
                             Duration::new(0, 100_000_000),
                         ) {
@@ -136,19 +150,20 @@ impl Node {
             })
             .unwrap();
 
-        rx
+        Ok(rx)
     }
 
     pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, Error> {
         let mut handle = self.handle.lock().unwrap();
+        let endpoint = self.in_ep.ok_or(Error::EndpointNotInitialized)?;
         match handle
             .as_mut()
             .expect("no handle")
-            .read_bulk(self.in_ep_id, buf, timeout)
+            .read_bulk(endpoint.address, buf, timeout)
         {
             Ok(size) => Ok(size),
             Err(rusb::Error::Timeout) => Err(Error::Timeout),
-            Err(e) => Err(Error::USBError(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -165,35 +180,23 @@ impl Node {
 
     pub fn write(&mut self, buf: &[u8], timeout: Duration) -> Result<usize, Error> {
         let mut handle = self.handle.lock().unwrap();
+        let endpoint = self.out_ep.ok_or(Error::EndpointNotInitialized)?;
         match handle
             .as_mut()
             .expect("no handle")
-            .write_bulk(self.out_ep_id, buf, timeout)
+            .write_bulk(endpoint.address, buf, timeout)
         {
             Ok(size) => Ok(size),
             Err(rusb::Error::Timeout) => Err(Error::Timeout),
-            Err(e) => Err(Error::USBError(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
     fn find_device(&self) -> Result<rusb::Device<rusb::GlobalContext>, Error> {
-        let devices = match rusb::devices() {
-            Ok(_d) => _d,
-            Err(e) => return Err(Error::USBError(e.to_string())),
-        };
+        let devices = rusb::devices()?;
 
         for device in devices.iter() {
-            let descriptor = match device.device_descriptor() {
-                Ok(_d) => _d,
-                Err(e) => {
-                    return Err(Error::USBError(format!(
-                        "getting descriptor for bus {} / address {}: {}",
-                        device.bus_number(),
-                        device.address(),
-                        e
-                    )))
-                }
-            };
+            let descriptor = device.device_descriptor()?;
 
             if descriptor.vendor_id() == self.vendor_id
                 && descriptor.product_id() == self.product_id
@@ -205,13 +208,10 @@ impl Node {
         Err(Error::DeviceNotFound)
     }
 
-    fn find_endpoints(&self) -> Result<(u8, u8), Error> {
+    fn find_endpoints(&self) -> Result<(Endpoint, Endpoint), Error> {
         let device = self.device.clone().ok_or(Error::DeviceNotInitialized)?;
 
-        let config = match device.config_descriptor(0) {
-            Ok(_c) => _c,
-            Err(e) => return Err(Error::USBError(e.to_string())),
-        };
+        let config = device.config_descriptor(0)?;
 
         let interfaces = config.interfaces();
 
@@ -224,9 +224,14 @@ impl Node {
                     if endpoint.usage_type() == rusb::UsageType::Data
                         && endpoint.transfer_type() == rusb::TransferType::Bulk
                     {
+                        let result = Some(Endpoint {
+                            interface: interface.number(),
+                            address: endpoint.address(),
+                        });
+
                         match endpoint.direction() {
-                            rusb::Direction::In => in_endpoint = Some(endpoint),
-                            rusb::Direction::Out => out_endpoint = Some(endpoint),
+                            rusb::Direction::In => in_endpoint = result,
+                            rusb::Direction::Out => out_endpoint = result,
                         }
                     }
                 }
@@ -235,42 +240,11 @@ impl Node {
 
         if let Some(in_ep) = in_endpoint {
             if let Some(out_ep) = out_endpoint {
-                return Ok((in_ep.address(), out_ep.address()));
+                return Ok((in_ep, out_ep));
             }
         }
 
         Err(Error::EndpointNotFound)
-    }
-
-    fn detach_kernel_drivers(&mut self) -> Result<(), Error> {
-        let device = self.device.clone().ok_or(Error::DeviceNotInitialized)?;
-        let mut handle_mutex = self.handle.lock().unwrap();
-        let handle = handle_mutex.as_mut().ok_or(Error::HandleNotInitialized)?;
-
-        let config = match device.config_descriptor(0) {
-            Ok(_c) => _c,
-            Err(e) => return Err(Error::USBError(e.to_string())),
-        };
-
-        for interface in config.interfaces() {
-            match handle.kernel_driver_active(interface.number()) {
-                Ok(active) => {
-                    if active {
-                        match handle.detach_kernel_driver(0) {
-                            Err(e) => return Err(Error::USBError(e.to_string())),
-                            Ok(e) => e,
-                        }
-                    }
-                }
-                Err(e) => {
-                    if e != rusb::Error::NotSupported {
-                        return Err(Error::USBError(e.to_string()));
-                    }
-                }
-            };
-        }
-
-        Ok(())
     }
 }
 
@@ -299,8 +273,8 @@ impl NodeBuilder {
             product_id: self.product_id,
             device: None,
             handle: Arc::new(Mutex::new(None)),
-            in_ep_id: 0,
-            out_ep_id: 0,
+            in_ep: None,
+            out_ep: None,
         }
     }
 }

@@ -23,7 +23,8 @@ fn main() -> Result<(), node::Error> {
 
     node.open()?;
 
-    let receiver = Receiver::new(node.receive_messages());
+    let rx = node.receive_messages()?;
+    let receiver = Receiver::new(rx);
     let join_handle = receiver.start();
 
     let reset = Message::ResetSystem;
