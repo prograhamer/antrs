@@ -1,6 +1,8 @@
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
+use crate::bytes;
+
 pub const SYNC: u8 = 0xa4;
 
 #[repr(u8)]
@@ -223,8 +225,7 @@ pub struct SetChannelIDData {
 
 impl SetChannelIDData {
     fn encode(&self) -> Vec<u8> {
-        let device_hi: u8 = ((self.device & 0xff00) >> 8).try_into().unwrap();
-        let device_lo: u8 = (self.device & 0xff).try_into().unwrap();
+        let (device_lo, device_hi) = bytes::u16_to_u8(self.device);
         let mut device_type_byte: u8 = if self.pairing { 0x80 } else { 0x00 };
         device_type_byte |= self.device_type & 0x7f;
 
@@ -249,8 +250,7 @@ pub struct SetChannelPeriodData {
 
 impl SetChannelPeriodData {
     fn encode(&self) -> Vec<u8> {
-        let period_hi: u8 = ((self.period & 0xff00) >> 8).try_into().unwrap();
-        let period_lo: u8 = (self.period & 0xff).try_into().unwrap();
+        let (period_lo, period_hi) = bytes::u16_to_u8(self.period);
         vec![
             SYNC,
             3,
@@ -471,9 +471,7 @@ impl Message {
             }
             MessageID::ResetSystem => Ok(Message::ResetSystem),
             MessageID::SetChannelID => {
-                let device_lo: u16 = data[4].into();
-                let device_hi: u16 = data[5].into();
-                let device = (device_hi << 8) + device_lo;
+                let device = bytes::u8_to_u16(data[4], data[5]);
                 let pairing = (data[6] & 0x80) == 0x80;
                 let device_type = data[6] & 0x7f;
 
@@ -486,9 +484,7 @@ impl Message {
                 }))
             }
             MessageID::SetChannelPeriod => {
-                let period_lo: u16 = data[4].into();
-                let period_hi: u16 = data[5].into();
-                let period = (period_hi << 8) + period_lo;
+                let period = bytes::u8_to_u16(data[4], data[5]);
 
                 Ok(Message::SetChannelPeriod(SetChannelPeriodData {
                     channel: data[3],

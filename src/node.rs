@@ -2,6 +2,7 @@ use core::time::Duration;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use crate::device::Device;
 use crate::message;
 
 #[derive(Debug)]
@@ -70,6 +71,18 @@ impl Node {
         *h = Some(handle);
 
         Ok(())
+    }
+
+    pub fn assign_channel(&mut self, device: &dyn Device) {
+        let channel_type = device.channel_type();
+        let rf_freq = device.rf_frequency();
+        let pairing = device.pairing();
+        let device_type = device.device_type();
+
+        println!(
+            "channel_type={}, rf_freq={}, pairing={}, device_type={}",
+            channel_type, rf_freq, pairing, device_type
+        );
     }
 
     pub fn receive_messages(&self) -> Result<mpsc::Receiver<message::Message>, Error> {
