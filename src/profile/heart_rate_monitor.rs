@@ -13,36 +13,39 @@ pub enum HeartRateMonitorPeriod {
     Period1Hz = 32280,
 }
 
+#[derive(Debug)]
 pub struct HeartRateMonitor {
     pairing: DevicePairing,
     period: HeartRateMonitorPeriod,
 
     data: HeartRateMonitorData,
+
+    sender: crossbeam_channel::Sender<HeartRateMonitorData>,
 }
 
-#[derive(Debug, PartialEq)]
-struct HeartRateMonitorData {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeartRateMonitorData {
     page: Option<u8>,
     page_toggle_observed: bool,
 
-    computed_heart_rate: Option<u8>,
-    heartbeat_count: Option<u8>,
-    heartbeat_event_time: Option<u16>,
+    pub computed_heart_rate: Option<u8>,
+    pub heartbeat_count: Option<u8>,
+    pub heartbeat_event_time: Option<u16>,
 
     // data page 1
-    cumulative_operating_time: Option<Duration>,
+    pub cumulative_operating_time: Option<Duration>,
 
     // data page 2
-    manufacturer_id: Option<u8>,
-    serial_number: Option<u16>,
+    pub manufacturer_id: Option<u8>,
+    pub serial_number: Option<u16>,
 
     // data page 3
-    hardware_version: Option<u8>,
-    software_version: Option<u8>,
-    model_number: Option<u8>,
+    pub hardware_version: Option<u8>,
+    pub software_version: Option<u8>,
+    pub model_number: Option<u8>,
 
     // data page 4
-    previous_heartbeat_event_time: Option<u16>,
+    pub previous_heartbeat_event_time: Option<u16>,
 }
 
 impl HeartRateMonitorData {
@@ -72,8 +75,13 @@ impl HeartRateMonitorData {
     }
 }
 
-pub fn new_search() -> HeartRateMonitor {
-    HeartRateMonitor {
+pub fn new_search() -> (
+    HeartRateMonitor,
+    crossbeam_channel::Receiver<HeartRateMonitorData>,
+) {
+    let (sender, receiver) = crossbeam_channel::unbounded();
+
+    let hrm = HeartRateMonitor {
         pairing: DevicePairing {
             device_id: 0,
             transmission_type: 0,
@@ -81,15 +89,36 @@ pub fn new_search() -> HeartRateMonitor {
         period: HeartRateMonitorPeriod::Period4Hz,
 
         data: HeartRateMonitorData::new(),
-    }
+
+        sender,
+    };
+
+    (hrm, receiver)
 }
 
-pub fn new_paired(config: DevicePairing) -> HeartRateMonitor {
-    HeartRateMonitor {
+pub fn new_paired(
+    config: DevicePairing,
+) -> (
+    HeartRateMonitor,
+    crossbeam_channel::Receiver<HeartRateMonitorData>,
+) {
+    let (sender, receiver) = crossbeam_channel::unbounded();
+
+    let hrm = HeartRateMonitor {
         pairing: config,
         period: HeartRateMonitorPeriod::Period4Hz,
 
         data: HeartRateMonitorData::new(),
+
+        sender,
+    };
+
+    (hrm, receiver)
+}
+
+impl HeartRateMonitor {
+    pub fn computed_heart_rate(&self) -> Option<u8> {
+        self.data.computed_heart_rate
     }
 }
 
@@ -127,7 +156,6 @@ impl Device for HeartRateMonitor {
     fn process_data(&mut self, data: [u8; 8]) -> Result<(), Error> {
         if !self.data.page_toggle_observed {
             if let Some(page) = self.data.page {
-                println!("page: {}, data[0]: {}", page, data[0]);
                 if page & 0x80 != data[0] & 0x80 {
                     self.data.page_toggle_observed = true;
                 }
@@ -163,6 +191,9 @@ impl Device for HeartRateMonitor {
                 }
             }
         }
+
+        self.sender.try_send(self.data.clone())?;
+
         Ok(())
     }
 }
@@ -182,7 +213,7 @@ mod test {
 
     #[test]
     fn it_processes_page1_standard_fields() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_1_TEST), Ok(()));
         let mut expected = HeartRateMonitorData::new();
         expected.page = Some(1);
@@ -194,7 +225,7 @@ mod test {
 
     #[test]
     fn it_processes_page1_specific_fields_after_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_3_TEST_TOGGLE), Ok(()));
         assert_eq!(hrm.process_data(PAGE_1_TEST), Ok(()));
         let mut expected = HeartRateMonitorData::new();
@@ -209,7 +240,7 @@ mod test {
 
     #[test]
     fn it_processes_page2_specific_fields_after_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_3_TEST_TOGGLE), Ok(()));
         assert_eq!(hrm.process_data(PAGE_2_TEST), Ok(()));
         let mut expected = HeartRateMonitorData::new();
@@ -225,7 +256,7 @@ mod test {
 
     #[test]
     fn it_does_not_process_page3_specific_fields_before_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_3_TEST), Ok(()));
         let mut expected = HeartRateMonitorData::new();
         expected.page = Some(3);
@@ -237,7 +268,7 @@ mod test {
 
     #[test]
     fn it_processes_page3_specific_fields_after_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_3_TEST), Ok(()));
         assert_eq!(hrm.process_data(PAGE_3_TEST_TOGGLE), Ok(()));
         let mut expected = HeartRateMonitorData::new();
@@ -254,7 +285,7 @@ mod test {
 
     #[test]
     fn it_does_not_process_page4_specific_fields_before_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_4_TEST), Ok(()));
         let mut expected = HeartRateMonitorData::new();
         expected.page = Some(4);
@@ -266,7 +297,7 @@ mod test {
 
     #[test]
     fn it_processes_page4_specific_fields_after_page_change_toggle() {
-        let mut hrm = new_search();
+        let (mut hrm, _receiver) = new_search();
         assert_eq!(hrm.process_data(PAGE_4_TEST), Ok(()));
         assert_eq!(hrm.process_data(PAGE_4_TEST_TOGGLE), Ok(()));
         let mut expected = HeartRateMonitorData::new();

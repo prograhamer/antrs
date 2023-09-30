@@ -1,6 +1,13 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Error {
     InvalidValue,
+    SendError,
+}
+
+impl<T> From<crossbeam_channel::TrySendError<T>> for Error {
+    fn from(_error: crossbeam_channel::TrySendError<T>) -> Self {
+        Error::SendError
+    }
 }
 
 pub trait Device {

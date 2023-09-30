@@ -1,3 +1,5 @@
+pub mod reader;
+
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
@@ -122,8 +124,8 @@ impl AssignChannelData {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BroadcastDataData {
-    channel: u8,
-    data: [u8; 8],
+    pub channel: u8,
+    pub data: [u8; 8],
 }
 
 impl BroadcastDataData {

@@ -1,11 +1,13 @@
 use core::time::Duration;
-use std::sync::{mpsc, Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
+use std::time::Instant;
 
 use crate::device::Device;
-use crate::message;
+use crate::message::{self, reader, Message, MessageCode, MessageID};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     DeviceNotFound,
     DeviceNotInitialized,
@@ -14,11 +16,16 @@ pub enum Error {
     EndpointNotFound,
     Timeout,
     USBError(rusb::Error),
+    ChannelResponseError,
+    NoAvailableChannel,
 }
 
 impl From<rusb::Error> for Error {
     fn from(value: rusb::Error) -> Self {
-        Error::USBError(value)
+        match value {
+            rusb::Error::Timeout => Error::Timeout,
+            _ => Error::USBError(value),
+        }
     }
 }
 
@@ -38,12 +45,15 @@ struct Endpoint {
 }
 
 pub struct Node {
+    network_key: [u8; 8],
     vendor_id: u16,
     product_id: u16,
     device: Option<rusb::Device<rusb::GlobalContext>>,
     handle: Arc<Mutex<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
     in_ep: Option<Endpoint>,
     out_ep: Option<Endpoint>,
+    inbound_messages: Arc<RwLock<Vec<Message>>>,
+    assigned: Arc<Mutex<HashMap<u8, Box<dyn Device + Send>>>>,
 }
 
 impl Node {
@@ -67,103 +77,242 @@ impl Node {
             handle.claim_interface(out_ep.interface)?;
         }
 
-        let mut h = self.handle.lock().unwrap();
-        *h = Some(handle);
+        {
+            let mut h = self.handle.lock().unwrap();
+            *h = Some(handle);
+        }
+
+        self.receive_messages()?;
+
+        self.write_message(Message::ResetSystem, Duration::from_millis(100))?;
+        thread::sleep(Duration::from_millis(2000));
+
+        let set_network_key = Message::SetNetworkKey(message::SetNetworkKeyData {
+            network: 0,
+            key: self.network_key,
+        });
+        self.write_message(set_network_key, Duration::from_millis(100))?;
+        self.expect_channel_response_no_error(
+            0,
+            MessageID::SetNetworkKey,
+            Duration::from_millis(1000),
+        )?;
 
         Ok(())
     }
 
-    pub fn assign_channel(&mut self, device: &dyn Device) {
+    pub fn close(&mut self) -> Result<(), Error> {
+        let assigned = self.assigned.lock().unwrap();
+
+        for channel in assigned.keys() {
+            self.write_message(
+                Message::CloseChannel(message::CloseChannelData { channel: *channel }),
+                Duration::from_millis(100),
+            )?;
+            self.expect_channel_response_no_error(
+                *channel,
+                MessageID::CloseChannel,
+                Duration::from_millis(1000),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn assign_channel(&mut self, device: Box<dyn Device + Send>) -> Result<(), Error> {
         let channel_type = device.channel_type();
         let rf_freq = device.rf_frequency();
         let pairing = device.pairing();
         let device_type = device.device_type();
 
+        let mut channel = None;
+
+        // TODO: make this locking precent concurrent calls to assign_channel clobbering the same
+        // channel
+        {
+            let assigned = self.assigned.lock().unwrap();
+
+            for i in 0..16 {
+                if !assigned.contains_key(&i) {
+                    channel = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let channel = if let Some(channel) = channel {
+            channel
+        } else {
+            return Err(Error::NoAvailableChannel);
+        };
+
         println!(
             "channel_type={}, rf_freq={}, pairing={}, device_type={}",
             channel_type, rf_freq, pairing, device_type
         );
+
+        let assign_channel = Message::AssignChannel(message::AssignChannelData {
+            channel,
+            channel_type: message::ChannelType::Receive,
+            network: 0,
+            extended_assignment: message::ChannelExtendedAssignment::empty(),
+        });
+        self.write_message(assign_channel, Duration::from_millis(100))?;
+        self.expect_channel_response_no_error(
+            channel,
+            MessageID::AssignChannel,
+            Duration::from_millis(100),
+        )?;
+
+        let pairing = device.pairing();
+        let set_channel_id = Message::SetChannelID(message::SetChannelIDData {
+            channel,
+            device: pairing.device_id,
+            pairing: false,
+            device_type: device.device_type(),
+            transmission_type: pairing.transmission_type,
+        });
+        self.write_message(set_channel_id, Duration::from_secs(100))?;
+        self.expect_channel_response_no_error(
+            channel,
+            MessageID::SetChannelID,
+            Duration::from_millis(100),
+        )?;
+
+        let set_channel_period = Message::SetChannelPeriod(message::SetChannelPeriodData {
+            channel,
+            period: device.channel_period(),
+        });
+        self.write_message(set_channel_period, Duration::from_millis(100))?;
+        self.expect_channel_response_no_error(
+            channel,
+            MessageID::SetChannelPeriod,
+            Duration::from_millis(100),
+        )?;
+
+        let set_channel_rf_freq =
+            Message::SetChannelRFFrequency(message::SetChannelRFFrequencyData {
+                channel,
+                frequency: device.rf_frequency(),
+            });
+        self.write_message(set_channel_rf_freq, Duration::from_millis(100))?;
+        self.expect_channel_response_no_error(
+            channel,
+            MessageID::SetChannelRFFrequency,
+            Duration::from_millis(100),
+        )?;
+
+        let open_channel = Message::OpenChannel(message::OpenChannelData { channel });
+        self.write_message(open_channel, Duration::from_millis(100))?;
+        self.expect_channel_response_no_error(
+            channel,
+            MessageID::OpenChannel,
+            Duration::from_millis(100),
+        )?;
+
+        {
+            let mut assigned = self.assigned.lock().unwrap();
+            assigned.insert(channel, device);
+        }
+
+        Ok(())
     }
 
-    pub fn receive_messages(&self) -> Result<mpsc::Receiver<message::Message>, Error> {
-        let (tx, rx) = mpsc::channel::<message::Message>();
-        let handle_mutex = Arc::clone(&self.handle);
-        let endpoint_id = self.in_ep.ok_or(Error::EndpointNotInitialized)?;
+    fn expect_channel_response_no_error(
+        &self,
+        channel: u8,
+        message_id: MessageID,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        let matcher = |message: &Message| {
+            if let Message::ChannelResponseEvent(data) = message {
+                data.channel == channel && data.message_id == message_id
+            } else {
+                false
+            }
+        };
 
-        thread::Builder::new()
-            .name(String::from("node message read loop"))
-            .spawn(move || {
-                let buf = &mut [0u8; 1024];
-                let mut write_index = 0usize;
-                let mut read_index = 0usize;
-
-                loop {
-                    let read_size;
-
-                    {
-                        let mut guard = handle_mutex.lock().unwrap();
-                        let handle = guard.as_mut().expect("no handle");
-
-                        read_size = match handle.read_bulk(
-                            endpoint_id.address,
-                            &mut buf[write_index..],
-                            Duration::new(0, 100_000_000),
-                        ) {
-                            Ok(size) => size,
-                            Err(e) => {
-                                if e != rusb::Error::Timeout {
-                                    panic!("read from endpoint: {}", e)
-                                } else {
-                                    0
-                                }
-                            }
-                        };
-                        write_index += read_size;
+        match self.wait_for_message(matcher, timeout) {
+            Some(message) => {
+                if let Message::ChannelResponseEvent(data) = message {
+                    if data.message_code == MessageCode::ResponseNoError {
+                        Ok(())
+                    } else {
+                        Err(Error::ChannelResponseError)
                     }
-
-                    if read_size > 0 {
-                        let mut discard_count = 0usize;
-                        while buf[read_index] != message::SYNC && read_index < write_index {
-                            read_index += 1;
-                            discard_count += 1;
-                        }
-
-                        if discard_count > 0 {
-                            println!("discarded {} bytes!", discard_count);
-                        }
-
-                        while read_index < write_index - 5 {
-                            let msg = match message::Message::decode(&buf[read_index..]) {
-                                Ok(msg) => msg,
-                                Err(e) => panic!("decoding message: {}", e),
-                            };
-
-                            read_index += msg.encoded_len();
-
-                            tx.send(msg).expect("send should succeed");
-                        }
-
-                        if read_index == write_index {
-                            read_index = 0;
-                            write_index = 0;
-                        } else if read_index > 0 {
-                            let offset = write_index - read_index;
-
-                            for i in 0..offset {
-                                buf[i] = buf[read_index + i];
-                            }
-
-                            read_index = 0;
-                            write_index = offset;
-                        }
-                    }
-
-                    thread::sleep(Duration::new(0, 10_000_000));
+                } else {
+                    unreachable!()
                 }
-            })
-            .unwrap();
+            }
+            None => Err(Error::Timeout),
+        }
+    }
 
-        Ok(rx)
+    fn wait_for_message<F>(&self, matcher: F, timeout: Duration) -> Option<Message>
+    where
+        F: Fn(&Message) -> bool,
+    {
+        let start = Instant::now();
+
+        // TODO: implement this with futures?
+        loop {
+            if start.elapsed() > timeout {
+                return None;
+            }
+
+            {
+                let inbound_messages = self.inbound_messages.read().unwrap();
+
+                for message in inbound_messages.iter() {
+                    if (matcher)(message) {
+                        return Some(*message);
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn receive_messages(&self) -> Result<(), Error> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let endpoint = self.in_ep.ok_or(Error::EndpointNotInitialized)?;
+        let handle = Arc::clone(&self.handle);
+
+        thread::spawn(move || {
+            let reader = HandleReader { endpoint, handle };
+            let mut publisher = reader::Publisher::new(&reader, tx, 4096);
+            publisher.run();
+        });
+
+        let inbound_messages = Arc::clone(&self.inbound_messages);
+        let assigned = Arc::clone(&self.assigned);
+
+        thread::spawn(move || loop {
+            match rx.recv() {
+                Ok(message) => {
+                    println!("received: {}", message);
+
+                    if let Message::BroadcastData(data) = message {
+                        let mut assigned = assigned.lock().unwrap();
+                        if let Some(device) = assigned.get_mut(&data.channel) {
+                            if let Err(e) = device.process_data(data.data) {
+                                println!("Error processing data: {:?}", e);
+                            }
+                        }
+                    } else {
+                        let mut inbound_messages = inbound_messages.write().unwrap();
+                        inbound_messages.push(message)
+                    }
+                }
+                Err(_) => {
+                    println!("error receiving from publisher");
+                    break;
+                }
+            }
+        });
+
+        Ok(())
     }
 
     pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, Error> {
@@ -180,18 +329,14 @@ impl Node {
         }
     }
 
-    pub fn write_message(
-        &mut self,
-        message: message::Message,
-        timeout: Duration,
-    ) -> Result<(), Error> {
+    pub fn write_message(&self, message: message::Message, timeout: Duration) -> Result<(), Error> {
         self.write(message.encode().as_ref(), timeout)?;
 
         println!("sent: {}", message);
         Ok(())
     }
 
-    pub fn write(&mut self, buf: &[u8], timeout: Duration) -> Result<usize, Error> {
+    pub fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, Error> {
         let mut handle = self.handle.lock().unwrap();
         let endpoint = self.out_ep.ok_or(Error::EndpointNotInitialized)?;
         match handle
@@ -261,22 +406,35 @@ impl Node {
     }
 }
 
-pub struct NodeBuilder {
-    vendor_id: u16,
-    product_id: u16,
+pub trait Reader {
+    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, crate::node::Error>;
 }
 
-impl Default for NodeBuilder {
-    fn default() -> Self {
-        Self::new()
+pub struct HandleReader {
+    handle: Arc<Mutex<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
+    endpoint: Endpoint,
+}
+
+impl Reader for HandleReader {
+    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, crate::node::Error> {
+        let guard = self.handle.lock().unwrap();
+        let handle = guard.as_ref().ok_or(Error::HandleNotInitialized)?;
+        Ok(handle.read_bulk(self.endpoint.address, buf, timeout)?)
     }
 }
 
+pub struct NodeBuilder {
+    vendor_id: u16,
+    product_id: u16,
+    network_key: [u8; 8],
+}
+
 impl NodeBuilder {
-    pub fn new() -> NodeBuilder {
+    pub fn new(network_key: [u8; 8]) -> NodeBuilder {
         NodeBuilder {
             vendor_id: DYNASTREAM_INNOVATIONS_VID,
             product_id: DI_ANT_M_STICK,
+            network_key,
         }
     }
 
@@ -284,10 +442,13 @@ impl NodeBuilder {
         Node {
             vendor_id: self.vendor_id,
             product_id: self.product_id,
+            network_key: self.network_key,
             device: None,
             handle: Arc::new(Mutex::new(None)),
             in_ep: None,
             out_ep: None,
+            inbound_messages: Arc::new(RwLock::new(vec![])),
+            assigned: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
