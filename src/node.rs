@@ -102,7 +102,7 @@ impl Node {
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
-        let assigned = self.assigned.lock().unwrap();
+        let mut assigned = self.assigned.lock().unwrap();
 
         for channel in assigned.keys() {
             self.write_message(
@@ -114,7 +114,18 @@ impl Node {
                 MessageID::CloseChannel,
                 Duration::from_millis(1000),
             )?;
+            let matcher = |message: &Message| {
+                if let Message::ChannelResponseEvent(data) = message {
+                    data.channel == *channel
+                        && data.message_id == MessageID::ChannelEvent
+                        && data.message_code == MessageCode::EventChannelClosed
+                } else {
+                    false
+                }
+            };
+            self.wait_for_message(matcher, Duration::from_millis(1000))?;
         }
+        assigned.clear();
 
         Ok(())
     }
@@ -127,7 +138,7 @@ impl Node {
 
         let mut channel = None;
 
-        // TODO: make this locking precent concurrent calls to assign_channel clobbering the same
+        // TODO: make this locking prevent concurrent calls to assign_channel clobbering the same
         // channel
         {
             let assigned = self.assigned.lock().unwrap();
@@ -232,23 +243,19 @@ impl Node {
             }
         };
 
-        match self.wait_for_message(matcher, timeout) {
-            Some(message) => {
-                if let Message::ChannelResponseEvent(data) = message {
-                    if data.message_code == MessageCode::ResponseNoError {
-                        Ok(())
-                    } else {
-                        Err(Error::ChannelResponseError)
-                    }
-                } else {
-                    unreachable!()
-                }
+        let message = self.wait_for_message(matcher, timeout)?;
+        if let Message::ChannelResponseEvent(data) = message {
+            if data.message_code == MessageCode::ResponseNoError {
+                Ok(())
+            } else {
+                Err(Error::ChannelResponseError)
             }
-            None => Err(Error::Timeout),
+        } else {
+            unreachable!()
         }
     }
 
-    fn wait_for_message<F>(&self, matcher: F, timeout: Duration) -> Option<Message>
+    fn wait_for_message<F>(&self, matcher: F, timeout: Duration) -> Result<Message, Error>
     where
         F: Fn(&Message) -> bool,
     {
@@ -257,7 +264,7 @@ impl Node {
         // TODO: implement this with futures?
         loop {
             if start.elapsed() > timeout {
-                return None;
+                return Err(Error::Timeout);
             }
 
             {
@@ -265,7 +272,7 @@ impl Node {
 
                 for message in inbound_messages.iter() {
                     if (matcher)(message) {
-                        return Some(*message);
+                        return Ok(*message);
                     }
                 }
             }
@@ -281,8 +288,8 @@ impl Node {
 
         thread::spawn(move || {
             let reader = HandleReader { endpoint, handle };
-            let mut publisher = reader::Publisher::new(&reader, tx, 4096);
-            publisher.run();
+            let publisher = reader::Publisher::new(&reader, tx, 4096);
+            publisher.run().expect("publisher run failed");
         });
 
         let inbound_messages = Arc::clone(&self.inbound_messages);
