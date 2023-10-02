@@ -192,7 +192,7 @@ impl Device for HeartRateMonitor {
             }
         }
 
-        self.sender.try_send(self.data.clone())?;
+        self.sender.try_send(self.data)?;
 
         Ok(())
     }
