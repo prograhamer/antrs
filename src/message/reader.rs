@@ -2,7 +2,6 @@ use crate::node;
 use core::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::thread;
 
 #[derive(Debug)]
 pub enum Error {
@@ -123,8 +122,6 @@ impl Publisher<'_> {
                     buffer.write_index = offset;
                 }
             }
-
-            thread::sleep(Duration::new(0, 10_000_000));
         }
     }
 }

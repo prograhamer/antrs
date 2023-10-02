@@ -49,7 +49,7 @@ pub struct Node {
     vendor_id: u16,
     product_id: u16,
     device: Option<rusb::Device<rusb::GlobalContext>>,
-    handle: Arc<Mutex<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
+    handle: Arc<RwLock<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
     in_ep: Option<Endpoint>,
     out_ep: Option<Endpoint>,
     inbound_messages: Arc<RwLock<Vec<Message>>>,
@@ -78,7 +78,7 @@ impl Node {
         }
 
         {
-            let mut h = self.handle.lock().unwrap();
+            let mut h = self.handle.write().unwrap();
             *h = Some(handle);
         }
 
@@ -323,10 +323,10 @@ impl Node {
     }
 
     pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, Error> {
-        let mut handle = self.handle.lock().unwrap();
+        let handle = self.handle.read().unwrap();
         let endpoint = self.in_ep.ok_or(Error::EndpointNotInitialized)?;
         match handle
-            .as_mut()
+            .as_ref()
             .expect("no handle")
             .read_bulk(endpoint.address, buf, timeout)
         {
@@ -344,10 +344,10 @@ impl Node {
     }
 
     pub fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, Error> {
-        let mut handle = self.handle.lock().unwrap();
+        let handle = self.handle.read().unwrap();
         let endpoint = self.out_ep.ok_or(Error::EndpointNotInitialized)?;
         match handle
-            .as_mut()
+            .as_ref()
             .expect("no handle")
             .write_bulk(endpoint.address, buf, timeout)
         {
@@ -418,13 +418,13 @@ pub trait Reader {
 }
 
 pub struct HandleReader {
-    handle: Arc<Mutex<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
+    handle: Arc<RwLock<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
     endpoint: Endpoint,
 }
 
 impl Reader for HandleReader {
     fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, crate::node::Error> {
-        let guard = self.handle.lock().unwrap();
+        let guard = self.handle.read().unwrap();
         let handle = guard.as_ref().ok_or(Error::HandleNotInitialized)?;
         Ok(handle.read_bulk(self.endpoint.address, buf, timeout)?)
     }
@@ -451,7 +451,7 @@ impl NodeBuilder {
             product_id: self.product_id,
             network_key: self.network_key,
             device: None,
-            handle: Arc::new(Mutex::new(None)),
+            handle: Arc::new(RwLock::new(None)),
             in_ep: None,
             out_ep: None,
             inbound_messages: Arc::new(RwLock::new(vec![])),
