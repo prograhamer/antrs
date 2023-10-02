@@ -201,12 +201,12 @@ mod test {
         let reader = MockReader::new(buffers);
 
         thread::scope(|s| {
-            let handle;
+            let receiver_handle;
             {
                 let stop = Arc::clone(&stop);
                 let messages = Arc::clone(&messages);
-                handle = s.spawn(move || loop {
-                    if stop.load(Ordering::SeqCst) {
+                receiver_handle = s.spawn(move || loop {
+                    if receiver.len() == 0 && stop.load(Ordering::SeqCst) {
                         break;
                     }
 
@@ -216,31 +216,39 @@ mod test {
                             messages.push(message);
                         }
                         Err(RecvTimeoutError::Disconnected) => panic!("receiver disconnected"),
-                        Err(_) => {}
+                        Err(RecvTimeoutError::Timeout) => {}
                     }
                 });
             }
 
             let publisher = Arc::new(super::Publisher::new(&reader, sender, 128));
 
-            let handle2;
+            let publisher_handle;
             {
                 let publisher = Arc::clone(&publisher);
-                handle2 = s.spawn(move || publisher.run());
+                publisher_handle = s.spawn(move || publisher.run());
             }
 
+            // Wait until all buffers are read from the mock reader
             while !reader.complete() {
                 thread::sleep(Duration::from_millis(1));
             }
 
             publisher.stop();
+
+            // Join publisher thread - when this completes, we know all messages have been read
+            // and published
+            if let Err(e) = publisher_handle
+                .join()
+                .expect("publisher thread shouldn't panic")
+            {
+                panic!("publisher run returned error: {:?}", e);
+            }
+
             stop.store(true, Ordering::SeqCst);
 
-            if handle.join().is_err() {
+            if receiver_handle.join().is_err() {
                 return Err("receiver thread shouldn't panic");
-            }
-            if let Err(e) = handle2.join().expect("publisher thread shouldn't panic") {
-                panic!("publisher run returned error: {:?}", e);
             }
 
             Ok(())
