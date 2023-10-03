@@ -96,14 +96,15 @@ impl Publisher<'_> {
                     let msg = match super::Message::decode(
                         &buffer.data[buffer.read_index..buffer.write_index],
                     ) {
-                        Ok(msg) => msg,
+                        Ok((msg, len)) => {
+                            buffer.read_index += len;
+                            msg
+                        }
                         Err(super::Error::InsufficientData) => {
                             break;
                         }
                         Err(e) => return Err(e.into()),
                     };
-
-                    buffer.read_index += msg.encoded_len();
 
                     self.sender.send(msg).expect("send should work");
                 }

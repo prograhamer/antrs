@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::device::Device;
-use crate::message::{self, reader, Message, MessageCode, MessageID};
+use crate::message::{self, reader, Message, MessageCode, MessageID, RequestMessageData};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -97,6 +97,12 @@ impl Node {
             MessageID::SetNetworkKey,
             Duration::from_millis(1000),
         )?;
+
+        let request_capabilities = Message::RequestMessage(RequestMessageData {
+            channel: 0,
+            message_id: MessageID::Capabilities,
+        });
+        self.write_message(request_capabilities, Duration::from_millis(100))?;
 
         Ok(())
     }

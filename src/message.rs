@@ -24,6 +24,7 @@ pub enum MessageID {
     RequestMessage = 0x4d,
     BroadcastData = 0x4e,
     SetChannelID = 0x51,
+    Capabilities = 0x54,
     StartupMessage = 0x6f,
 }
 
@@ -143,6 +144,93 @@ impl BroadcastDataData {
             self.data[5],
             self.data[6],
             self.data[7],
+        ]
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CapabilitiesStandardOptions : u8 {
+        const NO_RECEIVE_CHANNELS = 0x01;
+        const NO_TRANSMIT_CHANNELS = 0x02;
+        const NO_RECEIVE_MESSAGES = 0x04;
+        const NO_TRANSMIT_MESSAGES = 0x08;
+        const NO_ACKD_MESSAGES = 0x10;
+        const NO_BURST_MESSAGES = 0x20;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CapabilitiesAdvancedOptions : u8 {
+        const NETWORK_ENABLED = 0x02;
+        const SERIAL_NUMBER_ENABLED = 0x08;
+        const PER_CHANNEL_TX_POWER_ENABLED = 0x10;
+        const LOW_PRIORITY_SEARCH_ENABLED = 0x20;
+        const SCRIPT_ENABLED = 0x40;
+        const SEARCH_LIST_ENABLED = 0x80;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CapabilitiesAdvancedOptions2 : u8 {
+        const LED_ENABLED = 0x01;
+        const EXT_MESSAGE_ENABLED = 0x02;
+        const SCAN_MODE_ENABLED = 0x04;
+        const PROX_SEARCH_ENABLED = 0x10;
+        const EXT_ASSIGN_ENABLED = 0x20;
+        const FS_ANTFS_ENABLED = 0x40;
+        const FIT1_ENABLED = 0x80;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CapabilitiesAdvancedOptions3 : u8 {
+        const ADVANCED_BURST_ENABLED = 0x01;
+        const EVENT_BUFFERING_ENABLED = 0x02;
+        const EVENT_FILTERING_ENABLED = 0x04;
+        const HIGH_DUTY_SEARCH_ENABLED = 0x08;
+        const SEARCH_SHARING_ENABLED = 0x10;
+        const SELECTIVE_DATA_UPDATES_ENABLED = 0x40;
+        const ENCRYPTED_CHANNEL_ENABLED = 0x80;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CapabilitiesAdvancedOptions4 : u8 {
+        const RFACTIVE_NOTIFICATION_ENABLED = 0x01;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapabilitiesData {
+    pub max_channels: u8,
+    pub max_networks: u8,
+    pub standard_options: CapabilitiesStandardOptions,
+    pub advanced_options: CapabilitiesAdvancedOptions,
+    pub advanced_options_2: CapabilitiesAdvancedOptions2,
+    pub max_sensrcore_channels: u8,
+    pub advanced_options_3: CapabilitiesAdvancedOptions3,
+    pub advanced_options_4: CapabilitiesAdvancedOptions4,
+}
+
+impl CapabilitiesData {
+    fn encode(&self) -> Vec<u8> {
+        vec![
+            SYNC,
+            8,
+            MessageID::Capabilities.into(),
+            self.max_channels,
+            self.max_networks,
+            self.standard_options.bits(),
+            self.advanced_options.bits(),
+            self.advanced_options_2.bits(),
+            self.max_sensrcore_channels,
+            self.advanced_options_3.bits(),
+            self.advanced_options_4.bits(),
         ]
     }
 }
@@ -321,7 +409,6 @@ impl StartupMessageData {
 #[derive(Debug, PartialEq)]
 pub enum Error {
     InsufficientData,
-    InvalidChannelExtendedAssignment(u8),
     InvalidChannelType(u8),
     InvalidChecksum,
     InvalidMessageCode(u8),
@@ -339,6 +426,7 @@ impl std::fmt::Display for Error {
 pub enum Message {
     AssignChannel(AssignChannelData),
     BroadcastData(BroadcastDataData),
+    Capabilities(CapabilitiesData),
     ChannelResponseEvent(ChannelResponseEventData),
     CloseChannel(CloseChannelData),
     OpenChannel(OpenChannelData),
@@ -362,6 +450,7 @@ impl Message {
         let mut encoded = match self {
             Message::AssignChannel(base) => base.encode(),
             Message::BroadcastData(base) => base.encode(),
+            Message::Capabilities(base) => base.encode(),
             Message::ChannelResponseEvent(base) => base.encode(),
             Message::CloseChannel(base) => base.encode(),
             Message::OpenChannel(base) => base.encode(),
@@ -383,7 +472,7 @@ impl Message {
         encoded
     }
 
-    pub fn decode(data: &[u8]) -> Result<Message, Error> {
+    pub fn decode(data: &[u8]) -> Result<(Message, usize), Error> {
         if data.len() < 5 {
             return Err(Error::InsufficientData);
         }
@@ -412,33 +501,54 @@ impl Message {
             return Err(Error::InvalidChecksum);
         }
 
-        match id {
-            MessageID::ChannelEvent => Err(Error::InvalidMessageID(id.into())),
+        let message = match id {
+            MessageID::ChannelEvent => return Err(Error::InvalidMessageID(id.into())),
             MessageID::AssignChannel => {
                 let channel_type: ChannelType = match data[4].try_into() {
                     Ok(ct) => ct,
                     Err(_) => return Err(Error::InvalidChannelType(data[4])),
                 };
-                let extended_assignment = match ChannelExtendedAssignment::from_bits(data[6]) {
-                    Some(ea) => ea,
-                    None => return Err(Error::InvalidChannelExtendedAssignment(data[6])),
-                };
-                Ok(Message::AssignChannel(AssignChannelData {
+                let extended_assignment = ChannelExtendedAssignment::from_bits_retain(data[6]);
+                Message::AssignChannel(AssignChannelData {
                     channel: data[3],
                     channel_type,
                     network: data[5],
                     extended_assignment,
-                }))
+                })
             }
             MessageID::BroadcastData => {
                 let mut broadcast_data = [0u8; 8];
                 for (i, e) in broadcast_data.iter_mut().enumerate() {
                     *e = data[4 + i];
                 }
-                Ok(Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(BroadcastDataData {
                     channel: data[3],
                     data: broadcast_data,
-                }))
+                })
+            }
+            MessageID::Capabilities => {
+                let standard_options = CapabilitiesStandardOptions::from_bits_retain(data[5]);
+                let advanced_options = CapabilitiesAdvancedOptions::from_bits_retain(data[6]);
+                let advanced_options_2 = CapabilitiesAdvancedOptions2::from_bits_retain(data[7]);
+                let advanced_options_3 = CapabilitiesAdvancedOptions3::from_bits_retain(data[9]);
+
+                // Receive capabilities message with length 7 from ANT-M stick
+                let advanced_options_4 = if data_len == 8 {
+                    CapabilitiesAdvancedOptions4::from_bits_retain(data[10])
+                } else {
+                    CapabilitiesAdvancedOptions4::empty()
+                };
+
+                Message::Capabilities(CapabilitiesData {
+                    max_channels: data[3],
+                    max_networks: data[4],
+                    standard_options,
+                    advanced_options,
+                    advanced_options_2,
+                    max_sensrcore_channels: data[8],
+                    advanced_options_3,
+                    advanced_options_4,
+                })
             }
             MessageID::ChannelResponseEvent => {
                 let message_id: MessageID = match data[4].try_into() {
@@ -449,87 +559,68 @@ impl Message {
                     Ok(code) => code,
                     Err(_) => return Err(Error::InvalidMessageCode(data[5])),
                 };
-                Ok(Message::ChannelResponseEvent(ChannelResponseEventData {
+                Message::ChannelResponseEvent(ChannelResponseEventData {
                     channel: data[3],
                     message_id,
                     message_code,
-                }))
+                })
             }
-            MessageID::CloseChannel => {
-                Ok(Message::CloseChannel(CloseChannelData { channel: data[3] }))
-            }
-            MessageID::OpenChannel => {
-                Ok(Message::OpenChannel(OpenChannelData { channel: data[3] }))
-            }
+            MessageID::CloseChannel => Message::CloseChannel(CloseChannelData { channel: data[3] }),
+            MessageID::OpenChannel => Message::OpenChannel(OpenChannelData { channel: data[3] }),
             MessageID::RequestMessage => {
                 let message_id: MessageID = match data[4].try_into() {
                     Ok(id) => id,
                     Err(_) => return Err(Error::InvalidMessageID(data[4])),
                 };
-                Ok(Message::RequestMessage(RequestMessageData {
+                Message::RequestMessage(RequestMessageData {
                     channel: data[3],
                     message_id,
-                }))
+                })
             }
-            MessageID::ResetSystem => Ok(Message::ResetSystem),
+            MessageID::ResetSystem => Message::ResetSystem,
             MessageID::SetChannelID => {
                 let device = bytes::u8_to_u16(data[4], data[5]);
                 let pairing = (data[6] & 0x80) == 0x80;
                 let device_type = data[6] & 0x7f;
 
-                Ok(Message::SetChannelID(SetChannelIDData {
+                Message::SetChannelID(SetChannelIDData {
                     channel: data[3],
                     device,
                     pairing,
                     device_type,
                     transmission_type: data[7],
-                }))
+                })
             }
             MessageID::SetChannelPeriod => {
                 let period = bytes::u8_to_u16(data[4], data[5]);
 
-                Ok(Message::SetChannelPeriod(SetChannelPeriodData {
+                Message::SetChannelPeriod(SetChannelPeriodData {
                     channel: data[3],
                     period,
-                }))
+                })
             }
             MessageID::SetChannelRFFrequency => {
-                Ok(Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
+                Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
                     channel: data[3],
                     frequency: data[4],
-                }))
+                })
             }
             MessageID::SetNetworkKey => {
                 let mut key: [u8; 8] = [0; 8];
                 for (i, e) in key.iter_mut().enumerate() {
                     *e = data[4 + i];
                 }
-                Ok(Message::SetNetworkKey(SetNetworkKeyData {
+                Message::SetNetworkKey(SetNetworkKeyData {
                     network: data[3],
                     key,
-                }))
+                })
             }
-            MessageID::StartupMessage => Ok(Message::StartupMessage(StartupMessageData {
-                reason: data[3],
-            })),
-        }
-    }
+            MessageID::StartupMessage => {
+                Message::StartupMessage(StartupMessageData { reason: data[3] })
+            }
+        };
 
-    pub fn encoded_len(&self) -> usize {
-        4 + match self {
-            Message::AssignChannel(_) => 4,
-            Message::BroadcastData(_) => 9,
-            Message::ChannelResponseEvent(_) => 3,
-            Message::CloseChannel(_) => 1,
-            Message::OpenChannel(_) => 1,
-            Message::RequestMessage(_) => 2,
-            Message::ResetSystem => 1,
-            Message::SetChannelID(_) => 5,
-            Message::SetChannelPeriod(_) => 3,
-            Message::SetChannelRFFrequency(_) => 2,
-            Message::SetNetworkKey(_) => 9,
-            Message::StartupMessage(_) => 1,
-        }
+        Ok((message, message_len))
     }
 }
 
@@ -557,13 +648,85 @@ mod test {
         let data = vec![SYNC, 4, 0x42, 0x02, 0x40, 0x00, 0x01, 0xa1];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::AssignChannel(AssignChannelData {
-                channel: 2,
-                channel_type: ChannelType::ReceiveOnly,
-                network: 0,
-                extended_assignment: ChannelExtendedAssignment::BACKGROUND_SCANNING
-            }))
+            Ok((
+                Message::AssignChannel(AssignChannelData {
+                    channel: 2,
+                    channel_type: ChannelType::ReceiveOnly,
+                    network: 0,
+                    extended_assignment: ChannelExtendedAssignment::BACKGROUND_SCANNING
+                }),
+                8
+            ))
         )
+    }
+
+    #[test]
+    fn it_encodes_capabilities() {
+        let message = Message::Capabilities(CapabilitiesData {
+            max_channels: 16,
+            max_networks: 5,
+            standard_options: CapabilitiesStandardOptions::all(),
+            advanced_options: CapabilitiesAdvancedOptions::all(),
+            advanced_options_2: CapabilitiesAdvancedOptions2::all(),
+            max_sensrcore_channels: 73,
+            advanced_options_3: CapabilitiesAdvancedOptions3::all(),
+            advanced_options_4: CapabilitiesAdvancedOptions4::all(),
+        });
+        let encoded = message.encode();
+        assert_eq!(
+            encoded,
+            vec![SYNC, 8, 0x54, 0x10, 0x05, 0x3f, 0xfa, 0xf7, 0x49, 0xdf, 0x01, 0x48]
+        );
+    }
+
+    #[test]
+    fn it_decodes_capabilities() {
+        let data = vec![
+            SYNC, 8, 0x54, 0x10, 0x05, 0x3f, 0xfa, 0xf7, 0x49, 0xdf, 0x01, 0x48,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::Capabilities(CapabilitiesData {
+                    max_channels: 16,
+                    max_networks: 5,
+                    standard_options: CapabilitiesStandardOptions::all(),
+                    advanced_options: CapabilitiesAdvancedOptions::all(),
+                    advanced_options_2: CapabilitiesAdvancedOptions2::all(),
+                    max_sensrcore_channels: 73,
+                    advanced_options_3: CapabilitiesAdvancedOptions3::all(),
+                    advanced_options_4: CapabilitiesAdvancedOptions4::all(),
+                }),
+                12
+            ))
+        );
+
+        let data = vec![
+            0xa4, 0x07, 0x54, 0x08, 0x08, 0x00, 0xba, 0x36, 0x00, 0xdf, 0xa4,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::Capabilities(CapabilitiesData {
+                    max_channels: 8,
+                    max_networks: 8,
+                    standard_options: CapabilitiesStandardOptions::empty(),
+                    advanced_options: CapabilitiesAdvancedOptions::NETWORK_ENABLED
+                        | CapabilitiesAdvancedOptions::SERIAL_NUMBER_ENABLED
+                        | CapabilitiesAdvancedOptions::PER_CHANNEL_TX_POWER_ENABLED
+                        | CapabilitiesAdvancedOptions::LOW_PRIORITY_SEARCH_ENABLED
+                        | CapabilitiesAdvancedOptions::SEARCH_LIST_ENABLED,
+                    advanced_options_2: CapabilitiesAdvancedOptions2::EXT_MESSAGE_ENABLED
+                        | CapabilitiesAdvancedOptions2::SCAN_MODE_ENABLED
+                        | CapabilitiesAdvancedOptions2::PROX_SEARCH_ENABLED
+                        | CapabilitiesAdvancedOptions2::EXT_ASSIGN_ENABLED,
+                    max_sensrcore_channels: 0,
+                    advanced_options_3: CapabilitiesAdvancedOptions3::all(),
+                    advanced_options_4: CapabilitiesAdvancedOptions4::empty(),
+                }),
+                11
+            ))
+        );
     }
 
     #[test]
@@ -593,11 +756,14 @@ mod test {
         let decoded = Message::decode(&buf);
         assert_eq!(
             decoded,
-            Ok(Message::ChannelResponseEvent(ChannelResponseEventData {
-                channel: 0,
-                message_id: MessageID::SetNetworkKey,
-                message_code: MessageCode::ResponseNoError,
-            }))
+            Ok((
+                Message::ChannelResponseEvent(ChannelResponseEventData {
+                    channel: 0,
+                    message_id: MessageID::SetNetworkKey,
+                    message_code: MessageCode::ResponseNoError,
+                }),
+                7
+            ))
         );
     }
 
@@ -612,7 +778,7 @@ mod test {
         let data = [SYNC, 0x01, 0x4b, 0x02, 0xec];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::OpenChannel(OpenChannelData { channel: 2 }))
+            Ok((Message::OpenChannel(OpenChannelData { channel: 2 }), 5))
         )
     }
 
@@ -630,10 +796,13 @@ mod test {
         let data = [SYNC, 0x02, 0x4d, 0x02, 0x51, 0xb8];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::RequestMessage(RequestMessageData {
-                channel: 2,
-                message_id: MessageID::SetChannelID
-            }))
+            Ok((
+                Message::RequestMessage(RequestMessageData {
+                    channel: 2,
+                    message_id: MessageID::SetChannelID
+                }),
+                6
+            ))
         )
     }
 
@@ -646,7 +815,7 @@ mod test {
     #[test]
     fn it_decodes_reset_system() {
         let data = [SYNC, 0x01, 0x4a, 0, 0xef];
-        assert_eq!(Message::decode(&data), Ok(Message::ResetSystem))
+        assert_eq!(Message::decode(&data), Ok((Message::ResetSystem, 5)))
     }
 
     #[test]
@@ -669,13 +838,16 @@ mod test {
         let data = [SYNC, 0x05, 0x51, 0x02, 0xf7, 0x27, 0xf8, 0x00, 0xda];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::SetChannelID(SetChannelIDData {
-                channel: 2,
-                device: 10231,
-                pairing: true,
-                device_type: 120,
-                transmission_type: 0,
-            }))
+            Ok((
+                Message::SetChannelID(SetChannelIDData {
+                    channel: 2,
+                    device: 10231,
+                    pairing: true,
+                    device_type: 120,
+                    transmission_type: 0,
+                }),
+                9
+            ))
         )
     }
 
@@ -696,10 +868,13 @@ mod test {
         let data = [SYNC, 0x03, 0x43, 0x03, 0xe6, 0x0f, 0x0e];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::SetChannelPeriod(SetChannelPeriodData {
-                channel: 3,
-                period: 4070,
-            }))
+            Ok((
+                Message::SetChannelPeriod(SetChannelPeriodData {
+                    channel: 3,
+                    period: 4070,
+                }),
+                7
+            ))
         )
     }
 
@@ -717,10 +892,13 @@ mod test {
         let data = [SYNC, 0x02, 0x45, 0x02, 0x39, 0xd8];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
-                channel: 2,
-                frequency: 57,
-            }))
+            Ok((
+                Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
+                    channel: 2,
+                    frequency: 57,
+                }),
+                6
+            ))
         );
     }
 
@@ -741,10 +919,13 @@ mod test {
         let data = [SYNC, 9, 0x46, 0, 9, 8, 7, 6, 5, 4, 3, 2, 235];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::SetNetworkKey(SetNetworkKeyData {
-                network: 0,
-                key: [9, 8, 7, 6, 5, 4, 3, 2]
-            })),
+            Ok((
+                Message::SetNetworkKey(SetNetworkKeyData {
+                    network: 0,
+                    key: [9, 8, 7, 6, 5, 4, 3, 2]
+                }),
+                13
+            ))
         )
     }
 
@@ -759,7 +940,10 @@ mod test {
         let data = [SYNC, 0x01, MessageID::StartupMessage.into(), 0x20, 0xea];
         assert_eq!(
             Message::decode(&data),
-            Ok(Message::StartupMessage(StartupMessageData { reason: 0x20 }))
+            Ok((
+                Message::StartupMessage(StartupMessageData { reason: 0x20 }),
+                5
+            ))
         )
     }
 }
