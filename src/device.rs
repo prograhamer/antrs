@@ -1,3 +1,5 @@
+use crate::message;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Error {
     InvalidValue,
@@ -11,7 +13,7 @@ impl<T> From<crossbeam_channel::TrySendError<T>> for Error {
 }
 
 pub trait Device {
-    fn channel_type(&self) -> u8;
+    fn channel_type(&self) -> message::ChannelType;
     fn device_type(&self) -> u8;
     fn rf_frequency(&self) -> u8;
 

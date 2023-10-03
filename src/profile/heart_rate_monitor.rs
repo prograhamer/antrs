@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::bytes;
 use crate::device::{Device, DevicePairing, Error};
+use crate::{bytes, message};
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, IntoPrimitive, TryFromPrimitive)]
@@ -123,8 +123,8 @@ impl HeartRateMonitor {
 }
 
 impl Device for HeartRateMonitor {
-    fn channel_type(&self) -> u8 {
-        0
+    fn channel_type(&self) -> message::ChannelType {
+        message::ChannelType::Receive
     }
 
     fn device_type(&self) -> u8 {

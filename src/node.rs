@@ -137,11 +137,6 @@ impl Node {
     }
 
     pub fn assign_channel(&mut self, device: Box<dyn Device + Send>) -> Result<(), Error> {
-        let channel_type = device.channel_type();
-        let rf_freq = device.rf_frequency();
-        let pairing = device.pairing();
-        let device_type = device.device_type();
-
         let mut channel = None;
 
         // TODO: make this locking prevent concurrent calls to assign_channel clobbering the same
@@ -163,14 +158,9 @@ impl Node {
             return Err(Error::NoAvailableChannel);
         };
 
-        println!(
-            "channel_type={}, rf_freq={}, pairing={}, device_type={}",
-            channel_type, rf_freq, pairing, device_type
-        );
-
         let assign_channel = Message::AssignChannel(message::AssignChannelData {
             channel,
-            channel_type: message::ChannelType::Receive,
+            channel_type: device.channel_type(),
             network: 0,
             extended_assignment: message::ChannelExtendedAssignment::empty(),
         });
