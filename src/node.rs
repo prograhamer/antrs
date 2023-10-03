@@ -1,3 +1,5 @@
+mod capabilities;
+
 use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -18,6 +20,7 @@ pub enum Error {
     USBError(rusb::Error),
     ChannelResponseError,
     NoAvailableChannel,
+    CapabilitiesNotInitialized,
 }
 
 impl From<rusb::Error> for Error {
@@ -45,6 +48,7 @@ struct Endpoint {
 }
 
 pub struct Node {
+    capabilities: Option<capabilities::Capabilities>,
     network_key: [u8; 8],
     vendor_id: u16,
     product_id: u16,
@@ -103,6 +107,17 @@ impl Node {
             message_id: MessageID::Capabilities,
         });
         self.write_message(request_capabilities, Duration::from_millis(100))?;
+        let matcher = |message: &Message| {
+            if let Message::Capabilities(_) = message {
+                true
+            } else {
+                false
+            }
+        };
+        let capabilities = self.wait_for_message(matcher, Duration::from_millis(1000))?;
+        if let Message::Capabilities(data) = capabilities {
+            self.capabilities = Some(data.into())
+        }
 
         Ok(())
     }
@@ -138,13 +153,20 @@ impl Node {
 
     pub fn assign_channel(&mut self, device: Box<dyn Device + Send>) -> Result<(), Error> {
         let mut channel = None;
+        let max_channels;
+
+        if let Some(capabilities) = &self.capabilities {
+            max_channels = capabilities.max_channels;
+        } else {
+            return Err(Error::CapabilitiesNotInitialized);
+        }
 
         // TODO: make this locking prevent concurrent calls to assign_channel clobbering the same
         // channel
         {
             let assigned = self.assigned.lock().unwrap();
 
-            for i in 0..16 {
+            for i in 0..max_channels {
                 if !assigned.contains_key(&i) {
                     channel = Some(i);
                     break;
@@ -443,6 +465,7 @@ impl NodeBuilder {
 
     pub fn build(&self) -> Node {
         Node {
+            capabilities: None,
             vendor_id: self.vendor_id,
             product_id: self.product_id,
             network_key: self.network_key,
