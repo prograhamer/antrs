@@ -25,6 +25,8 @@ pub enum MessageID {
     BroadcastData = 0x4e,
     SetChannelID = 0x51,
     Capabilities = 0x54,
+    EnableExtendedMessages = 0x66,
+    LibConfig = 0x6e,
     StartupMessage = 0x6f,
 }
 
@@ -123,28 +125,41 @@ impl AssignChannelData {
     }
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct ExtendedDataFlag : u8 {
+        const RX_TIMESTAMP = 0x20;
+        const RSSI = 0x40;
+        const CHANNEL_ID = 0x80;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BroadcastChannelID {
+    pub device_number: u16,
+    pub device_type: u8,
+    pub transmission_type: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BroadcastRSSI {
+    pub measurement_type: u8,
+    pub rssi: u8,
+    pub threshold_config: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BroadcastDataData {
     pub channel: u8,
-    pub data: [u8; 8],
+    pub data: Option<[u8; 8]>,
+    pub channel_id: Option<BroadcastChannelID>,
+    pub rssi: Option<BroadcastRSSI>,
+    pub rx_timestamp: Option<u16>,
 }
 
 impl BroadcastDataData {
     fn encode(&self) -> Vec<u8> {
-        vec![
-            SYNC,
-            9,
-            MessageID::BroadcastData.into(),
-            self.channel,
-            self.data[0],
-            self.data[1],
-            self.data[2],
-            self.data[3],
-            self.data[4],
-            self.data[5],
-            self.data[6],
-            self.data[7],
-        ]
+        todo!();
     }
 }
 
@@ -263,6 +278,34 @@ pub struct CloseChannelData {
 impl CloseChannelData {
     fn encode(&self) -> Vec<u8> {
         vec![SYNC, 1, MessageID::CloseChannel.into(), self.channel]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnableExtendedMessagesData {
+    pub enabled: u8,
+}
+
+impl EnableExtendedMessagesData {
+    fn encode(&self) -> Vec<u8> {
+        vec![
+            SYNC,
+            2,
+            MessageID::EnableExtendedMessages.into(),
+            0,
+            self.enabled,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LibConfigData {
+    pub config: ExtendedDataFlag,
+}
+
+impl LibConfigData {
+    fn encode(&self) -> Vec<u8> {
+        vec![SYNC, 2, MessageID::LibConfig.into(), 0, self.config.bits()]
     }
 }
 
@@ -429,6 +472,8 @@ pub enum Message {
     Capabilities(CapabilitiesData),
     ChannelResponseEvent(ChannelResponseEventData),
     CloseChannel(CloseChannelData),
+    EnableExtendedMessages(EnableExtendedMessagesData),
+    LibConfig(LibConfigData),
     OpenChannel(OpenChannelData),
     RequestMessage(RequestMessageData),
     ResetSystem,
@@ -453,6 +498,8 @@ impl Message {
             Message::Capabilities(base) => base.encode(),
             Message::ChannelResponseEvent(base) => base.encode(),
             Message::CloseChannel(base) => base.encode(),
+            Message::EnableExtendedMessages(base) => base.encode(),
+            Message::LibConfig(base) => base.encode(),
             Message::OpenChannel(base) => base.encode(),
             Message::RequestMessage(base) => base.encode(),
             Message::ResetSystem => ResetSystem {}.encode(),
@@ -473,7 +520,7 @@ impl Message {
     }
 
     pub fn decode(data: &[u8]) -> Result<(Message, usize), Error> {
-        if data.len() < 5 {
+        if data.len() < 4 {
             return Err(Error::InsufficientData);
         }
 
@@ -517,13 +564,51 @@ impl Message {
                 })
             }
             MessageID::BroadcastData => {
-                let mut broadcast_data = [0u8; 8];
-                for (i, e) in broadcast_data.iter_mut().enumerate() {
-                    *e = data[4 + i];
+                let mut broadcast_data = None;
+                let mut channel_id = None;
+                let mut rssi = None;
+                let mut rx_timestamp = None;
+
+                if data_len >= 9 {
+                    let mut decoded = [0u8; 8];
+                    for (i, e) in decoded.iter_mut().enumerate() {
+                        *e = data[4 + i];
+                    }
+                    broadcast_data = Some(decoded);
+
+                    let mut base = 13usize;
+                    let data_len: usize = data_len.into();
+                    let flag = ExtendedDataFlag::from_bits_retain(data[12]);
+
+                    if data_len >= 14 && flag.contains(ExtendedDataFlag::CHANNEL_ID) {
+                        channel_id = Some(BroadcastChannelID {
+                            device_number: bytes::u8_to_u16(data[base], data[base + 1]),
+                            device_type: data[base + 2],
+                            transmission_type: data[base + 3],
+                        });
+                        base += 4;
+                    }
+                    if base + 3 <= data_len + 3 && flag.contains(ExtendedDataFlag::RSSI) {
+                        rssi = Some(BroadcastRSSI {
+                            measurement_type: data[base],
+                            rssi: data[base + 1],
+                            threshold_config: data[base + 2],
+                        });
+
+                        // Padding byte not present in spec appears in the data with flags == ExtendedDataFlag::RSSI?
+                        base += 4;
+                    }
+                    if base + 2 <= data_len + 3 && flag.contains(ExtendedDataFlag::RX_TIMESTAMP) {
+                        rx_timestamp = Some(bytes::u8_to_u16(data[base], data[base + 1]));
+                    }
                 }
+
                 Message::BroadcastData(BroadcastDataData {
                     channel: data[3],
                     data: broadcast_data,
+                    channel_id,
+                    rssi,
+                    rx_timestamp,
                 })
             }
             MessageID::Capabilities => {
@@ -566,6 +651,13 @@ impl Message {
                 })
             }
             MessageID::CloseChannel => Message::CloseChannel(CloseChannelData { channel: data[3] }),
+            MessageID::EnableExtendedMessages => {
+                Message::EnableExtendedMessages(EnableExtendedMessagesData { enabled: data[4] })
+            }
+            MessageID::LibConfig => {
+                let config = ExtendedDataFlag::from_bits_retain(data[4]);
+                Message::LibConfig(LibConfigData { config })
+            }
             MessageID::OpenChannel => Message::OpenChannel(OpenChannelData { channel: data[3] }),
             MessageID::RequestMessage => {
                 let message_id: MessageID = match data[4].try_into() {
@@ -658,6 +750,169 @@ mod test {
                 8
             ))
         )
+    }
+
+    #[test]
+    fn it_decodes_broadcast_data_zero_length() {
+        let data = vec![0xa4, 0x00, 0x4e, 0xea];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0xea,
+                    data: None,
+                    channel_id: None,
+                    rssi: None,
+                    rx_timestamp: None
+                }),
+                4
+            ))
+        )
+    }
+
+    #[test]
+    fn it_decodes_broadcast_data() {
+        let data = vec![
+            0xa4, 0x09, 0x4e, 0x00, 0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47, 0x63,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47]),
+                    channel_id: None,
+                    rssi: None,
+                    rx_timestamp: None,
+                }),
+                13
+            ))
+        );
+    }
+
+    #[test]
+    fn it_decodes_extended_broadcast_data_20() {
+        let data = vec![
+            0xa4, 0x0c, 0x4e, 0x00, 0x84, 0x22, 0x06, 0x1d, 0xd0, 0x25, 0x05, 0x48, 0x20, 0xee,
+            0xbe, 0x93,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x84, 0x22, 0x06, 0x1d, 0xd0, 0x25, 0x05, 0x48]),
+                    channel_id: None,
+                    rssi: None,
+                    rx_timestamp: Some(0xbeee),
+                }),
+                16
+            ))
+        );
+    }
+
+    #[test]
+    fn it_decodes_extended_broadcast_data_40() {
+        let data = vec![
+            0xa4, 0x0e, 0x4e, 0x00, 0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00, 0x40, 0x10,
+            0x01, 0x6c, 0x00, 0x6f,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
+                    channel_id: None,
+                    rssi: Some(BroadcastRSSI {
+                        measurement_type: 0x10,
+                        rssi: 0x01,
+                        threshold_config: 0x6c,
+                    }),
+                    rx_timestamp: None,
+                }),
+                18
+            ))
+        );
+    }
+
+    #[test]
+    fn it_decodes_extended_broadcast_data_60() {
+        let data = vec![
+            0xa4, 0x10, 0x4e, 0x00, 0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00, 0x60, 0x10,
+            0x01, 0x6a, 0x00, 0x24, 0x5e, 0x2d,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
+                    channel_id: None,
+                    rssi: Some(BroadcastRSSI {
+                        measurement_type: 0x10,
+                        rssi: 0x01,
+                        threshold_config: 0x6a,
+                    }),
+                    rx_timestamp: Some(0x5e24),
+                }),
+                20
+            ))
+        );
+    }
+
+    #[test]
+    fn it_decodes_extended_broadcast_data_80() {
+        let data = vec![
+            0xa4, 0x0e, 0x4e, 0x00, 0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00, 0x80, 0x53,
+            0x6f, 0x23, 0x65, 0xa8,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
+                    channel_id: Some(BroadcastChannelID {
+                        device_number: 0x6f53,
+                        device_type: 0x23,
+                        transmission_type: 0x65,
+                    }),
+                    rssi: None,
+                    rx_timestamp: None,
+                }),
+                18
+            ))
+        );
+    }
+
+    #[test]
+    fn it_decodes_extended_broadcast_data_e0() {
+        let data = vec![
+            0xa4, 0x14, 0x4e, 0x00, 0x02, 0x00, 0x16, 0x0e, 0xc7, 0xdc, 0x00, 0x01, 0xe0, 0x53,
+            0x6f, 0x23, 0x65, 0x10, 0x01, 0x6d, 0x00, 0x61, 0x84, 0xfd,
+        ];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::BroadcastData(BroadcastDataData {
+                    channel: 0,
+                    data: Some([0x02, 0x00, 0x16, 0x0e, 0xc7, 0xdc, 0x00, 0x01]),
+                    channel_id: Some(BroadcastChannelID {
+                        device_number: 0x6f53,
+                        device_type: 0x23,
+                        transmission_type: 0x65,
+                    }),
+                    rssi: Some(BroadcastRSSI {
+                        measurement_type: 0x10,
+                        rssi: 0x01,
+                        threshold_config: 0x6d,
+                    }),
+                    rx_timestamp: Some(0x8461),
+                }),
+                24
+            ))
+        );
     }
 
     #[test]
@@ -763,6 +1018,53 @@ mod test {
                     message_code: MessageCode::ResponseNoError,
                 }),
                 7
+            ))
+        );
+    }
+
+    #[test]
+    fn it_encodes_enable_extended_messages() {
+        let message = Message::EnableExtendedMessages(EnableExtendedMessagesData { enabled: 1 });
+        assert_eq!(message.encode(), vec![SYNC, 2, 0x66, 0x00, 0x01, 0xc1])
+    }
+
+    #[test]
+    fn it_decodes_enable_extended_messages() {
+        let buf = vec![
+            SYNC,
+            2,
+            MessageID::EnableExtendedMessages.into(),
+            0x00,
+            0x01,
+            0xc1,
+        ];
+        assert_eq!(
+            Message::decode(&buf),
+            Ok((
+                Message::EnableExtendedMessages(EnableExtendedMessagesData { enabled: 1 }),
+                6
+            ))
+        )
+    }
+
+    #[test]
+    fn it_encodes_lib_config() {
+        let message = Message::LibConfig(LibConfigData {
+            config: ExtendedDataFlag::all(),
+        });
+        assert_eq!(message.encode(), vec![SYNC, 0x02, 0x6e, 0x00, 0xe0, 0x28])
+    }
+
+    #[test]
+    fn it_decodes_lib_config() {
+        let data = vec![SYNC, 0x02, 0x6e, 0x00, 0xe0, 0x28];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::LibConfig(LibConfigData {
+                    config: ExtendedDataFlag::all()
+                }),
+                6
             ))
         );
     }

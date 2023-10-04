@@ -313,10 +313,12 @@ impl Node {
                     println!("received: {}", message);
 
                     if let Message::BroadcastData(data) = message {
-                        let mut assigned = assigned.lock().unwrap();
-                        if let Some(device) = assigned.get_mut(&data.channel) {
-                            if let Err(e) = device.process_data(data.data) {
-                                println!("Error processing data: {:?}", e);
+                        if let Some(bytes) = data.data {
+                            let mut assigned = assigned.lock().unwrap();
+                            if let Some(device) = assigned.get_mut(&data.channel) {
+                                if let Err(e) = device.process_data(bytes) {
+                                    println!("Error processing data: {:?}", e);
+                                }
                             }
                         }
                     } else {
