@@ -4,10 +4,11 @@ use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::Instant;
 
 use crate::device::Device;
 use crate::message::{self, reader, Message, MessageCode, MessageID, RequestMessageData};
+
+mod matcher;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -47,6 +48,11 @@ struct Endpoint {
     address: u8,
 }
 
+struct MessageNotifier {
+    matcher: Box<dyn Fn(Message) -> bool + Send>,
+    sender: crossbeam_channel::Sender<Message>,
+}
+
 pub struct Node {
     capabilities: Option<capabilities::Capabilities>,
     network_key: [u8; 8],
@@ -56,7 +62,7 @@ pub struct Node {
     handle: Arc<RwLock<Option<rusb::DeviceHandle<rusb::GlobalContext>>>>,
     in_ep: Option<Endpoint>,
     out_ep: Option<Endpoint>,
-    inbound_messages: Arc<RwLock<Vec<Message>>>,
+    notifiers: Arc<Mutex<Vec<MessageNotifier>>>,
     assigned: Arc<Mutex<HashMap<u8, Box<dyn Device + Send>>>>,
 }
 
@@ -95,20 +101,22 @@ impl Node {
             network: 0,
             key: self.network_key,
         });
-        self.write_message(set_network_key, Duration::from_millis(100))?;
-        self.expect_channel_response_no_error(
+        self.expect_channel_response_no_error_after(
             0,
             MessageID::SetNetworkKey,
             Duration::from_millis(1000),
+            || self.write_message(set_network_key, Duration::from_millis(100)),
         )?;
 
         let request_capabilities = Message::RequestMessage(RequestMessageData {
             channel: 0,
             message_id: MessageID::Capabilities,
         });
-        self.write_message(request_capabilities, Duration::from_millis(100))?;
-        let matcher = |message: &Message| matches!(message, Message::Capabilities(_));
-        let capabilities = self.wait_for_message(matcher, Duration::from_millis(1000))?;
+        let capabilities = self.wait_for_message_after(
+            matcher::match_capabilities(),
+            Duration::from_millis(1000),
+            || self.write_message(request_capabilities, Duration::from_millis(100)),
+        )?;
         if let Message::Capabilities(data) = capabilities {
             self.capabilities = Some(data.into())
         }
@@ -119,28 +127,30 @@ impl Node {
     pub fn close(&mut self) -> Result<(), Error> {
         let mut assigned = self.assigned.lock().unwrap();
 
-        for channel in assigned.keys() {
-            self.write_message(
-                Message::CloseChannel(message::CloseChannelData { channel: *channel }),
-                Duration::from_millis(100),
-            )?;
-            self.expect_channel_response_no_error(
-                *channel,
+        for &channel in assigned.keys() {
+            self.expect_channel_response_no_error_after(
+                channel,
                 MessageID::CloseChannel,
                 Duration::from_millis(1000),
+                || {
+                    self.wait_for_message_after(
+                        matcher::match_channel_event(channel, MessageCode::EventChannelClosed),
+                        Duration::from_millis(1000),
+                        || {
+                            self.write_message(
+                                Message::CloseChannel(message::CloseChannelData { channel }),
+                                Duration::from_millis(100),
+                            )
+                        },
+                    )
+                },
             )?;
-            let matcher = |message: &Message| {
-                if let Message::ChannelResponseEvent(data) = message {
-                    data.channel == *channel
-                        && data.message_id == MessageID::ChannelEvent
-                        && data.message_code == MessageCode::EventChannelClosed
-                } else {
-                    false
-                }
-            };
-            self.wait_for_message(matcher, Duration::from_millis(1000))?;
         }
         assigned.clear();
+
+        let mut handle = self.handle.write().unwrap();
+        let handle = handle.as_mut().ok_or(Error::HandleNotInitialized)?;
+        handle.reset()?;
 
         Ok(())
     }
@@ -180,11 +190,11 @@ impl Node {
             network: 0,
             extended_assignment: message::ChannelExtendedAssignment::empty(),
         });
-        self.write_message(assign_channel, Duration::from_millis(100))?;
-        self.expect_channel_response_no_error(
+        self.expect_channel_response_no_error_after(
             channel,
             MessageID::AssignChannel,
             Duration::from_millis(100),
+            || self.write_message(assign_channel, Duration::from_millis(100)),
         )?;
 
         let pairing = device.pairing();
@@ -195,22 +205,23 @@ impl Node {
             device_type: device.device_type(),
             transmission_type: pairing.transmission_type,
         });
-        self.write_message(set_channel_id, Duration::from_secs(100))?;
-        self.expect_channel_response_no_error(
+
+        self.expect_channel_response_no_error_after(
             channel,
             MessageID::SetChannelID,
             Duration::from_millis(100),
+            || self.write_message(set_channel_id, Duration::from_secs(100)),
         )?;
 
         let set_channel_period = Message::SetChannelPeriod(message::SetChannelPeriodData {
             channel,
             period: device.channel_period(),
         });
-        self.write_message(set_channel_period, Duration::from_millis(100))?;
-        self.expect_channel_response_no_error(
+        self.expect_channel_response_no_error_after(
             channel,
             MessageID::SetChannelPeriod,
             Duration::from_millis(100),
+            || self.write_message(set_channel_period, Duration::from_millis(100)),
         )?;
 
         let set_channel_rf_freq =
@@ -218,19 +229,19 @@ impl Node {
                 channel,
                 frequency: device.rf_frequency(),
             });
-        self.write_message(set_channel_rf_freq, Duration::from_millis(100))?;
-        self.expect_channel_response_no_error(
+        self.expect_channel_response_no_error_after(
             channel,
             MessageID::SetChannelRFFrequency,
             Duration::from_millis(100),
+            || self.write_message(set_channel_rf_freq, Duration::from_millis(100)),
         )?;
 
         let open_channel = Message::OpenChannel(message::OpenChannelData { channel });
-        self.write_message(open_channel, Duration::from_millis(100))?;
-        self.expect_channel_response_no_error(
+        self.expect_channel_response_no_error_after(
             channel,
             MessageID::OpenChannel,
             Duration::from_millis(100),
+            || self.write_message(open_channel, Duration::from_millis(100)),
         )?;
 
         {
@@ -241,21 +252,19 @@ impl Node {
         Ok(())
     }
 
-    fn expect_channel_response_no_error(
+    fn expect_channel_response_no_error_after<T, F: FnOnce() -> Result<T, Error>>(
         &self,
         channel: u8,
         message_id: MessageID,
         timeout: Duration,
+        after: F,
     ) -> Result<(), Error> {
-        let matcher = |message: &Message| {
-            if let Message::ChannelResponseEvent(data) = message {
-                data.channel == channel && data.message_id == message_id
-            } else {
-                false
-            }
-        };
+        let message = self.wait_for_message_after(
+            matcher::match_channel_response(channel, message_id),
+            timeout,
+            after,
+        )?;
 
-        let message = self.wait_for_message(matcher, timeout)?;
         if let Message::ChannelResponseEvent(data) = message {
             if data.message_code == MessageCode::ResponseNoError {
                 Ok(())
@@ -267,30 +276,33 @@ impl Node {
         }
     }
 
-    fn wait_for_message<F>(&self, matcher: F, timeout: Duration) -> Result<Message, Error>
-    where
-        F: Fn(&Message) -> bool,
-    {
-        let start = Instant::now();
+    fn wait_for_message_after<T, F: FnOnce() -> Result<T, Error>>(
+        &self,
+        matcher: matcher::Matcher<Message, bool>,
+        timeout: Duration,
+        after: F,
+    ) -> Result<Message, Error> {
+        let receiver = self.notify(matcher);
 
-        // TODO: implement this with futures?
-        loop {
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout);
-            }
+        (after)()?;
 
-            {
-                let inbound_messages = self.inbound_messages.read().unwrap();
+        receiver.recv_timeout(timeout).map_err(|e| match e {
+            crossbeam_channel::RecvTimeoutError::Timeout => Error::Timeout,
+            crossbeam_channel::RecvTimeoutError::Disconnected => panic!("receiver disconnected"),
+        })
+    }
 
-                for message in inbound_messages.iter() {
-                    if (matcher)(message) {
-                        return Ok(*message);
-                    }
-                }
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
+    fn notify(
+        &self,
+        matcher: matcher::Matcher<Message, bool>,
+    ) -> crossbeam_channel::Receiver<Message> {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let mut notifiers = self.notifiers.lock().unwrap();
+        notifiers.push(MessageNotifier {
+            matcher,
+            sender: sender.clone(),
+        });
+        receiver
     }
 
     fn receive_messages(&self) -> Result<(), Error> {
@@ -304,8 +316,8 @@ impl Node {
             publisher.run().expect("publisher run failed");
         });
 
-        let inbound_messages = Arc::clone(&self.inbound_messages);
         let assigned = Arc::clone(&self.assigned);
+        let notifiers = Arc::clone(&self.notifiers);
 
         thread::spawn(move || loop {
             match rx.recv() {
@@ -322,8 +334,19 @@ impl Node {
                             }
                         }
                     } else {
-                        let mut inbound_messages = inbound_messages.write().unwrap();
-                        inbound_messages.push(message)
+                        let mut notifiers = notifiers.lock().unwrap();
+                        let mut to_delete = vec![];
+                        for (index, notifier) in notifiers.iter().enumerate() {
+                            if (notifier.matcher)(message) {
+                                to_delete.push(index);
+                                if let Err(e) = notifier.sender.try_send(message) {
+                                    println!("failed to notify of message: {:?}: {}", message, e)
+                                }
+                            }
+                        }
+                        for index in to_delete {
+                            notifiers.swap_remove(index);
+                        }
                     }
                 }
                 Err(_) => {
@@ -469,7 +492,7 @@ impl NodeBuilder {
             handle: Arc::new(RwLock::new(None)),
             in_ep: None,
             out_ep: None,
-            inbound_messages: Arc::new(RwLock::new(vec![])),
+            notifiers: Arc::new(Mutex::new(vec![])),
             assigned: Arc::new(Mutex::new(HashMap::new())),
         }
     }
