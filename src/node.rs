@@ -8,8 +8,6 @@ use std::thread;
 use crate::device;
 use crate::message::{self, reader, Message, MessageCode, MessageID, RequestMessageData};
 
-mod matcher;
-
 #[derive(Debug, PartialEq)]
 pub enum Error {
     DeviceNotFound,
@@ -127,7 +125,7 @@ impl Node {
             message_id: MessageID::Capabilities,
         });
         let capabilities = self.wait_for_message_after(
-            matcher::match_capabilities(),
+            Box::new(|message| matches!(message, Message::Capabilities(_))),
             Duration::from_millis(1000),
             || self.write_message(request_capabilities, Duration::from_millis(100)),
         )?;
@@ -367,7 +365,13 @@ impl Node {
         after: F,
     ) -> Result<(), Error> {
         let message = self.wait_for_message_after(
-            matcher::match_channel_response(channel, message_id),
+            Box::new(move |message| {
+                if let Message::ChannelResponseEvent(data) = message {
+                    data.channel == channel && data.message_id == message_id
+                } else {
+                    false
+                }
+            }),
             timeout,
             after,
         )?;
@@ -385,7 +389,7 @@ impl Node {
 
     fn wait_for_message_after<T, F: FnOnce() -> Result<T, Error>>(
         &self,
-        matcher: matcher::Matcher<Message, bool>,
+        matcher: Box<dyn Fn(Message) -> bool + Send>,
         timeout: Duration,
         after: F,
     ) -> Result<Message, Error> {
@@ -401,7 +405,7 @@ impl Node {
 
     fn notify(
         &self,
-        matcher: matcher::Matcher<Message, bool>,
+        matcher: Box<dyn Fn(Message) -> bool + Send>,
     ) -> crossbeam_channel::Receiver<Message> {
         let (sender, receiver) = crossbeam_channel::bounded(1);
         let mut notifiers = self.notifiers.lock().unwrap();
