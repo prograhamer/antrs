@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::device::{Device, DevicePairing, Error};
+use crate::device::{DataProcessor, Device, DevicePairing, Error};
 use crate::{bytes, message};
 
 #[repr(u16)]
@@ -13,7 +13,7 @@ pub enum HeartRateMonitorPeriod {
     Period1Hz = 32280,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HeartRateMonitor {
     pairing: DevicePairing,
     period: HeartRateMonitorPeriod,
@@ -153,46 +153,54 @@ impl Device for HeartRateMonitor {
         self.pairing
     }
 
-    fn process_data(&mut self, data: [u8; 8]) -> Result<(), Error> {
-        if !self.data.page_toggle_observed {
-            if let Some(page) = self.data.page {
-                if page & 0x80 != data[0] & 0x80 {
-                    self.data.page_toggle_observed = true;
-                }
-            }
-        }
-        self.data.page = Some(data[0]);
-        self.data.heartbeat_event_time = Some(bytes::u8_to_u16(data[4], data[5]));
-        self.data.heartbeat_count = Some(data[6]);
-        self.data.computed_heart_rate = Some(data[7]);
-        if self.data.page_toggle_observed {
-            let page = data[0] & 0x7f;
-            match page {
-                1 => {
-                    let raw = bytes::u8_to_u32(data[1], data[2], data[3], 0);
-                    self.data.cumulative_operating_time =
-                        Some(Duration::from_secs((raw * 2).into()));
-                }
-                2 => {
-                    self.data.manufacturer_id = Some(data[1]);
-                    self.data.serial_number = Some(bytes::u8_to_u16(data[2], data[3]));
-                }
-                3 => {
-                    self.data.hardware_version = Some(data[1]);
-                    self.data.software_version = Some(data[2]);
-                    self.data.model_number = Some(data[3]);
-                }
-                4 => {
-                    self.data.previous_heartbeat_event_time =
-                        Some(bytes::u8_to_u16(data[2], data[3]));
-                }
-                _ => {
-                    return Err(Error::InvalidValue);
-                }
-            }
-        }
+    fn as_data_processor(&self) -> Box<dyn DataProcessor + Send> {
+        Box::new(self.clone())
+    }
+}
 
-        self.sender.try_send(self.data)?;
+impl DataProcessor for HeartRateMonitor {
+    fn process_data(&mut self, data: message::BroadcastDataData) -> Result<(), Error> {
+        if let Some(data) = data.data {
+            if !self.data.page_toggle_observed {
+                if let Some(page) = self.data.page {
+                    if page & 0x80 != data[0] & 0x80 {
+                        self.data.page_toggle_observed = true;
+                    }
+                }
+            }
+            self.data.page = Some(data[0]);
+            self.data.heartbeat_event_time = Some(bytes::u8_to_u16(data[4], data[5]));
+            self.data.heartbeat_count = Some(data[6]);
+            self.data.computed_heart_rate = Some(data[7]);
+            if self.data.page_toggle_observed {
+                let page = data[0] & 0x7f;
+                match page {
+                    1 => {
+                        let raw = bytes::u8_to_u32(data[1], data[2], data[3], 0);
+                        self.data.cumulative_operating_time =
+                            Some(Duration::from_secs((raw * 2).into()));
+                    }
+                    2 => {
+                        self.data.manufacturer_id = Some(data[1]);
+                        self.data.serial_number = Some(bytes::u8_to_u16(data[2], data[3]));
+                    }
+                    3 => {
+                        self.data.hardware_version = Some(data[1]);
+                        self.data.software_version = Some(data[2]);
+                        self.data.model_number = Some(data[3]);
+                    }
+                    4 => {
+                        self.data.previous_heartbeat_event_time =
+                            Some(bytes::u8_to_u16(data[2], data[3]));
+                    }
+                    _ => {
+                        return Err(Error::InvalidValue);
+                    }
+                }
+            }
+
+            self.sender.try_send(self.data)?;
+        }
 
         Ok(())
     }
@@ -201,15 +209,58 @@ impl Device for HeartRateMonitor {
 #[cfg(test)]
 mod test {
     use super::{new_search, HeartRateMonitorData};
-    use crate::device::Device;
+    use crate::{device::DataProcessor, message};
     use core::time::Duration;
 
-    const PAGE_1_TEST: [u8; 8] = [1, 83, 153, 1, 147, 80, 31, 73];
-    const PAGE_2_TEST: [u8; 8] = [2, 1, 40, 0, 33, 11, 3, 71];
-    const PAGE_3_TEST: [u8; 8] = [3, 4, 21, 7, 247, 75, 20, 64];
-    const PAGE_3_TEST_TOGGLE: [u8; 8] = [131, 4, 21, 7, 247, 75, 20, 64];
-    const PAGE_4_TEST: [u8; 8] = [4, 27, 222, 94, 173, 98, 26, 63];
-    const PAGE_4_TEST_TOGGLE: [u8; 8] = [132, 27, 222, 94, 173, 98, 26, 63];
+    const PAGE_1_TEST: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([1, 83, 153, 1, 147, 80, 31, 73]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+    const PAGE_2_TEST: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([2, 1, 40, 0, 33, 11, 3, 71]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+    const PAGE_3_TEST: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([3, 4, 21, 7, 247, 75, 20, 64]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+    const PAGE_3_TEST_TOGGLE: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([131, 4, 21, 7, 247, 75, 20, 64]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+    const PAGE_4_TEST: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([4, 27, 222, 94, 173, 98, 26, 63]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+    const PAGE_4_TEST_TOGGLE: message::BroadcastDataData = message::BroadcastDataData {
+        channel: 0,
+        data: Some([132, 27, 222, 94, 173, 98, 26, 63]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    };
+
+    //const PAGE_1_TEST: [u8; 8] = [1, 83, 153, 1, 147, 80, 31, 73];
+    // const PAGE_2_TEST: [u8; 8] = [2, 1, 40, 0, 33, 11, 3, 71];
+    // const PAGE_3_TEST: [u8; 8] = [3, 4, 21, 7, 247, 75, 20, 64];
+    // const PAGE_3_TEST_TOGGLE: [u8; 8] = [131, 4, 21, 7, 247, 75, 20, 64];
+    // const PAGE_4_TEST: [u8; 8] = [4, 27, 222, 94, 173, 98, 26, 63];
+    // const PAGE_4_TEST_TOGGLE: [u8; 8] = [132, 27, 222, 94, 173, 98, 26, 63];
 
     #[test]
     fn it_processes_page1_standard_fields() {

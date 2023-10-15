@@ -1,11 +1,11 @@
 mod capabilities;
 
 use core::time::Duration;
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use crate::device::Device;
+use crate::device;
 use crate::message::{self, reader, Message, MessageCode, MessageID, RequestMessageData};
 
 mod matcher;
@@ -22,6 +22,7 @@ pub enum Error {
     ChannelResponseError,
     NoAvailableChannel,
     CapabilitiesNotInitialized,
+    ExtendedMessagesNotSupported,
 }
 
 impl From<rusb::Error> for Error {
@@ -53,6 +54,19 @@ struct MessageNotifier {
     sender: crossbeam_channel::Sender<Message>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChannelStatus {
+    Assigned,
+    Open,
+    Closed,
+}
+
+struct ChannelAssignment {
+    device: Option<Box<dyn device::DataProcessor + Send>>,
+    status: ChannelStatus,
+    events: Vec<MessageCode>,
+}
+
 pub struct Node {
     capabilities: Option<capabilities::Capabilities>,
     network_key: [u8; 8],
@@ -63,7 +77,7 @@ pub struct Node {
     in_ep: Option<Endpoint>,
     out_ep: Option<Endpoint>,
     notifiers: Arc<Mutex<Vec<MessageNotifier>>>,
-    assigned: Arc<Mutex<HashMap<u8, Box<dyn Device + Send>>>>,
+    assigned: Arc<RwLock<HashMap<u8, Mutex<ChannelAssignment>>>>,
 }
 
 impl Node {
@@ -125,38 +139,128 @@ impl Node {
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
-        let mut assigned = self.assigned.lock().unwrap();
+        let assigned = Arc::clone(&self.assigned);
+        let assigned = assigned.read().unwrap();
 
         for &channel in assigned.keys() {
-            self.expect_channel_response_no_error_after(
-                channel,
-                MessageID::CloseChannel,
-                Duration::from_millis(1000),
-                || {
-                    self.wait_for_message_after(
-                        matcher::match_channel_event(channel, MessageCode::EventChannelClosed),
-                        Duration::from_millis(1000),
-                        || {
-                            self.write_message(
-                                Message::CloseChannel(message::CloseChannelData { channel }),
-                                Duration::from_millis(100),
-                            )
-                        },
-                    )
-                },
-            )?;
+            self.close_channel(channel)?;
         }
-        assigned.clear();
-
-        let mut handle = self.handle.write().unwrap();
-        let handle = handle.as_mut().ok_or(Error::HandleNotInitialized)?;
-        handle.reset()?;
 
         Ok(())
     }
 
-    pub fn assign_channel(&mut self, device: Box<dyn Device + Send>) -> Result<(), Error> {
-        let mut channel = None;
+    pub fn close_channel(&mut self, channel: u8) -> Result<(), Error> {
+        let assigned = self.assigned.read().unwrap();
+        if let Some(assignment) = assigned.get(&channel) {
+            let assignment = assignment.lock().unwrap();
+            if assignment.status != ChannelStatus::Closed {
+                self.expect_channel_response_no_error_after(
+                    channel,
+                    MessageID::CloseChannel,
+                    Duration::from_millis(1000),
+                    || {
+                        self.write_message(
+                            Message::CloseChannel(message::CloseChannelData { channel }),
+                            Duration::from_millis(100),
+                        )
+                    },
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn channel_status(&self, channel: u8) -> Option<(ChannelStatus, Vec<MessageCode>)> {
+        let assigned = self.assigned.read().unwrap();
+        if let Some(assignment) = assigned.get(&channel) {
+            let assignment = assignment.lock().unwrap();
+            return Some((assignment.status, assignment.events.clone()));
+        }
+        None
+    }
+
+    pub fn search(
+        &mut self,
+    ) -> Result<(u8, crossbeam_channel::Receiver<message::BroadcastChannelID>), Error> {
+        let (search, receiver) = device::Search::new();
+
+        let channel = self._assign_channel(Box::new(search))?;
+
+        let enable_extended_messages =
+            Message::EnableExtendedMessages(message::EnableExtendedMessagesData { enabled: 1 });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::EnableExtendedMessages,
+            Duration::from_millis(100),
+            || self.write_message(enable_extended_messages, Duration::from_millis(100)),
+        )?;
+
+        let assign_channel = Message::AssignChannel(message::AssignChannelData {
+            channel,
+            channel_type: message::ChannelType::Receive,
+            network: 0,
+            extended_assignment: message::ChannelExtendedAssignment::BACKGROUND_SCANNING,
+        });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::AssignChannel,
+            Duration::from_millis(100),
+            || self.write_message(assign_channel, Duration::from_millis(100)),
+        )?;
+
+        let set_channel_id = Message::SetChannelID(message::SetChannelIDData {
+            channel,
+            device: 0,
+            pairing: false,
+            device_type: 0,
+            transmission_type: 0,
+        });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::SetChannelID,
+            Duration::from_millis(100),
+            || self.write_message(set_channel_id, Duration::from_secs(100)),
+        )?;
+
+        let set_channel_period = Message::SetChannelPeriod(message::SetChannelPeriodData {
+            channel,
+            period: 8070,
+        });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::SetChannelPeriod,
+            Duration::from_millis(100),
+            || self.write_message(set_channel_period, Duration::from_millis(100)),
+        )?;
+
+        let set_channel_rf_freq =
+            Message::SetChannelRFFrequency(message::SetChannelRFFrequencyData {
+                channel,
+                frequency: 57,
+            });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::SetChannelRFFrequency,
+            Duration::from_millis(100),
+            || self.write_message(set_channel_rf_freq, Duration::from_millis(100)),
+        )?;
+
+        let open_channel = Message::OpenChannel(message::OpenChannelData { channel });
+        self.expect_channel_response_no_error_after(
+            channel,
+            MessageID::OpenChannel,
+            Duration::from_millis(100),
+            || self.write_message(open_channel, Duration::from_millis(100)),
+        )?;
+
+        Ok((channel, receiver))
+    }
+
+    fn _assign_channel(
+        &mut self,
+        processor: Box<dyn device::DataProcessor + Send>,
+    ) -> Result<u8, Error> {
         let max_channels;
 
         if let Some(capabilities) = &self.capabilities {
@@ -165,24 +269,23 @@ impl Node {
             return Err(Error::CapabilitiesNotInitialized);
         }
 
-        // TODO: make this locking prevent concurrent calls to assign_channel clobbering the same
-        // channel
-        {
-            let assigned = self.assigned.lock().unwrap();
-
-            for i in 0..max_channels {
-                if !assigned.contains_key(&i) {
-                    channel = Some(i);
-                    break;
-                }
+        let mut assigned = self.assigned.write().unwrap();
+        for i in 0..max_channels {
+            if let hash_map::Entry::Vacant(e) = assigned.entry(i) {
+                e.insert(Mutex::new(ChannelAssignment {
+                    status: ChannelStatus::Assigned,
+                    device: Some(processor),
+                    events: Vec::new(),
+                }));
+                return Ok(i);
             }
         }
 
-        let channel = if let Some(channel) = channel {
-            channel
-        } else {
-            return Err(Error::NoAvailableChannel);
-        };
+        Err(Error::NoAvailableChannel)
+    }
+
+    pub fn assign_channel(&mut self, device: Box<dyn device::Device + Send>) -> Result<u8, Error> {
+        let channel = self._assign_channel(device.as_data_processor())?;
 
         let assign_channel = Message::AssignChannel(message::AssignChannelData {
             channel,
@@ -245,11 +348,15 @@ impl Node {
         )?;
 
         {
-            let mut assigned = self.assigned.lock().unwrap();
-            assigned.insert(channel, device);
+            let assigned = self.assigned.read().unwrap();
+            let assignment = assigned
+                .get(&channel)
+                .expect("should contain new assignment");
+            let mut assignment = assignment.lock().unwrap();
+            assignment.status = ChannelStatus::Open;
         }
 
-        Ok(())
+        Ok(channel)
     }
 
     fn expect_channel_response_no_error_after<T, F: FnOnce() -> Result<T, Error>>(
@@ -319,39 +426,63 @@ impl Node {
         let assigned = Arc::clone(&self.assigned);
         let notifiers = Arc::clone(&self.notifiers);
 
-        thread::spawn(move || loop {
-            match rx.recv() {
-                Ok(message) => {
-                    println!("received: {}", message);
-
-                    if let Message::BroadcastData(data) = message {
-                        if let Some(bytes) = data.data {
-                            let mut assigned = assigned.lock().unwrap();
-                            if let Some(device) = assigned.get_mut(&data.channel) {
-                                if let Err(e) = device.process_data(bytes) {
-                                    println!("Error processing data: {:?}", e);
-                                }
-                            }
-                        }
-                    } else {
-                        let mut notifiers = notifiers.lock().unwrap();
-                        let mut to_delete = vec![];
-                        for (index, notifier) in notifiers.iter().enumerate() {
-                            if (notifier.matcher)(message) {
-                                to_delete.push(index);
-                                if let Err(e) = notifier.sender.try_send(message) {
-                                    println!("failed to notify of message: {:?}: {}", message, e)
-                                }
-                            }
-                        }
-                        for index in to_delete {
-                            notifiers.swap_remove(index);
+        thread::spawn(move || {
+            let send_notifications = move |message| {
+                let mut notifiers = notifiers.lock().unwrap();
+                let mut to_delete = vec![];
+                for (index, notifier) in notifiers.iter().enumerate() {
+                    if (notifier.matcher)(message) {
+                        to_delete.push(index);
+                        if let Err(e) = notifier.sender.try_send(message) {
+                            println!("failed to notify of message: {:?}: {}", message, e)
                         }
                     }
                 }
-                Err(_) => {
-                    println!("error receiving from publisher");
-                    break;
+                for index in to_delete {
+                    notifiers.swap_remove(index);
+                }
+            };
+
+            loop {
+                match rx.recv() {
+                    Ok(message) => {
+                        println!("received: {}", message);
+
+                        match message {
+                            Message::BroadcastData(data) => {
+                                let assigned = assigned.read().unwrap();
+                                if let Some(assignment) = assigned.get(&data.channel) {
+                                    let mut assignment = assignment.lock().unwrap();
+                                    if let Some(ref mut device) = assignment.device {
+                                        if let Err(e) = device.process_data(data) {
+                                            println!("Error processing data: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Message::ChannelResponseEvent(data) => {
+                                if data.message_id == MessageID::ChannelEvent {
+                                    let assigned = assigned.read().unwrap();
+                                    if let Some(assignment) = assigned.get(&data.channel) {
+                                        let mut assignment = assignment.lock().unwrap();
+                                        if data.message_code == MessageCode::EventChannelClosed {
+                                            assignment.status = ChannelStatus::Closed;
+                                            assignment.device = None;
+                                        }
+                                        assignment.events.push(data.message_code);
+                                    }
+                                }
+                                send_notifications(message);
+                            }
+                            _ => {
+                                send_notifications(message);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!("error receiving from publisher");
+                        break;
+                    }
                 }
             }
         });
@@ -493,7 +624,7 @@ impl NodeBuilder {
             in_ep: None,
             out_ep: None,
             notifiers: Arc::new(Mutex::new(vec![])),
-            assigned: Arc::new(Mutex::new(HashMap::new())),
+            assigned: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }

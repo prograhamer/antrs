@@ -134,7 +134,7 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BroadcastChannelID {
     pub device_number: u16,
     pub device_type: u8,
