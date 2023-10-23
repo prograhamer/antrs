@@ -21,6 +21,14 @@ pub fn u8_to_u32(lsb: u8, byte1: u8, byte2: u8, msb: u8) -> u32 {
     (msb << 24) + (byte2 << 16) + (byte1 << 8) + lsb
 }
 
+pub fn test_bit(byte: u8, bit: u8) -> bool {
+    if bit > 7 {
+        false
+    } else {
+        (byte & (1 << bit)) == (1 << bit)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::{u16_to_u8, u8_to_u16, u8_to_u32};

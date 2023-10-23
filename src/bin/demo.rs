@@ -38,16 +38,12 @@ fn main() -> Result<(), node::Error> {
         select! {
             recv(hrm_receiver) -> data => {
                 if let Ok(data) = data {
-                    if let Some(hr) = data.computed_heart_rate {
-                        println!("Received data from HRM, heart rate = {}", hr);
-                    }
+                    println!("Received data from HRM, heart rate = {}", data.computed_heart_rate);
                 }
             }
             recv(hrm_receiver2) -> data => {
                 if let Ok(data) = data {
-                    if let Some(hr) = data.computed_heart_rate {
-                        println!("Received data from HRM #2, heart rate = {}", hr);
-                    }
+                    println!("Received data from HRM #2, heart rate = {}", data.computed_heart_rate);
                 }
             }
         }

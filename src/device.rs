@@ -20,7 +20,6 @@ pub trait Device: DataProcessor {
     fn rf_frequency(&self) -> u8;
 
     fn channel_period(&self) -> u16;
-    fn set_channel_period(&mut self, period: u16) -> Result<(), Error>;
     fn pairing(&self) -> DevicePairing;
 
     fn as_data_processor(&self) -> Box<dyn DataProcessor + Send>;
