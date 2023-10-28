@@ -9,6 +9,17 @@ pub const SYNC: u8 = 0xa4;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
+pub enum CommandStatus {
+    Pass = 0,
+    Fail = 1,
+    NotSupported = 2,
+    Rejected = 3,
+    Pending = 4,
+    Uninitialized = 255,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
 pub enum MessageID {
     // ChannelEvent is a special MessageID relating to a channel event, not channel response
     ChannelEvent = 0x01,
@@ -23,6 +34,7 @@ pub enum MessageID {
     CloseChannel = 0x4c,
     RequestMessage = 0x4d,
     BroadcastData = 0x4e,
+    AcknowledgedData = 0x4f,
     SetChannelID = 0x51,
     Capabilities = 0x54,
     EnableExtendedMessages = 0x66,
@@ -135,31 +147,36 @@ bitflags! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BroadcastChannelID {
+pub struct ChannelID {
     pub device_number: u16,
     pub device_type: u8,
     pub transmission_type: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BroadcastRSSI {
+pub struct RSSI {
     pub measurement_type: u8,
     pub rssi: u8,
     pub threshold_config: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BroadcastDataData {
+pub struct DataPayload {
     pub channel: u8,
     pub data: Option<[u8; 8]>,
-    pub channel_id: Option<BroadcastChannelID>,
-    pub rssi: Option<BroadcastRSSI>,
+    pub channel_id: Option<ChannelID>,
+    pub rssi: Option<RSSI>,
     pub rx_timestamp: Option<u16>,
 }
 
-impl BroadcastDataData {
-    fn encode(&self) -> Vec<u8> {
-        todo!();
+impl DataPayload {
+    fn encode(&self, message_id: MessageID) -> Vec<u8> {
+        // TODO: don't panic, handle all variants of data payload
+        let data = self.data.unwrap();
+
+        let mut result = vec![SYNC, 9, message_id.into(), self.channel];
+        result.extend(data.iter());
+        result
     }
 }
 
@@ -467,8 +484,9 @@ impl std::fmt::Display for Error {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Message {
+    AcknowledgedData(DataPayload),
     AssignChannel(AssignChannelData),
-    BroadcastData(BroadcastDataData),
+    BroadcastData(DataPayload),
     Capabilities(CapabilitiesData),
     ChannelResponseEvent(ChannelResponseEventData),
     CloseChannel(CloseChannelData),
@@ -493,8 +511,9 @@ impl std::fmt::Display for Message {
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
         let mut encoded = match self {
+            Message::AcknowledgedData(base) => base.encode(MessageID::AcknowledgedData),
             Message::AssignChannel(base) => base.encode(),
-            Message::BroadcastData(base) => base.encode(),
+            Message::BroadcastData(base) => base.encode(MessageID::BroadcastData),
             Message::Capabilities(base) => base.encode(),
             Message::ChannelResponseEvent(base) => base.encode(),
             Message::CloseChannel(base) => base.encode(),
@@ -563,8 +582,8 @@ impl Message {
                     extended_assignment,
                 })
             }
-            MessageID::BroadcastData => {
-                let mut broadcast_data = None;
+            id @ MessageID::BroadcastData | id @ MessageID::AcknowledgedData => {
+                let mut payload_data = None;
                 let mut channel_id = None;
                 let mut rssi = None;
                 let mut rx_timestamp = None;
@@ -574,14 +593,14 @@ impl Message {
                     for (i, e) in decoded.iter_mut().enumerate() {
                         *e = data[4 + i];
                     }
-                    broadcast_data = Some(decoded);
+                    payload_data = Some(decoded);
 
                     let mut base = 13usize;
                     let data_len: usize = data_len.into();
                     let flag = ExtendedDataFlag::from_bits_retain(data[12]);
 
                     if data_len >= 14 && flag.contains(ExtendedDataFlag::CHANNEL_ID) {
-                        channel_id = Some(BroadcastChannelID {
+                        channel_id = Some(ChannelID {
                             device_number: bytes::u8_to_u16(data[base], data[base + 1]),
                             device_type: data[base + 2],
                             transmission_type: data[base + 3],
@@ -589,7 +608,7 @@ impl Message {
                         base += 4;
                     }
                     if base + 3 <= data_len + 3 && flag.contains(ExtendedDataFlag::RSSI) {
-                        rssi = Some(BroadcastRSSI {
+                        rssi = Some(RSSI {
                             measurement_type: data[base],
                             rssi: data[base + 1],
                             threshold_config: data[base + 2],
@@ -603,13 +622,19 @@ impl Message {
                     }
                 }
 
-                Message::BroadcastData(BroadcastDataData {
+                let payload = DataPayload {
                     channel: data[3],
-                    data: broadcast_data,
+                    data: payload_data,
                     channel_id,
                     rssi,
                     rx_timestamp,
-                })
+                };
+
+                match id {
+                    MessageID::AcknowledgedData => Message::AcknowledgedData(payload),
+                    MessageID::BroadcastData => Message::BroadcastData(payload),
+                    _ => unreachable!(),
+                }
             }
             MessageID::Capabilities => {
                 let standard_options = CapabilitiesStandardOptions::from_bits_retain(data[5]);
@@ -716,9 +741,34 @@ impl Message {
     }
 }
 
+pub fn request_data_page(channel: u8, page: u8) -> Message {
+    Message::AcknowledgedData(DataPayload {
+        channel,
+        data: Some([0x46, 0xff, 0xff, 0xff, 0xff, 0x80, page, 0x01]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    })
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn it_encodes_acknowledged_data() {
+        let message = Message::AcknowledgedData(DataPayload {
+            channel: 0,
+            data: Some([0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        });
+        assert_eq!(
+            message.encode(),
+            vec![0xa4, 0x09, 0x4f, 0x00, 0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47, 0x62]
+        );
+    }
 
     #[test]
     fn it_encodes_assign_channel() {
@@ -753,12 +803,27 @@ mod test {
     }
 
     #[test]
+    fn it_encodes_broadcast_data() {
+        let message = Message::BroadcastData(DataPayload {
+            channel: 0,
+            data: Some([0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        });
+        assert_eq!(
+            message.encode(),
+            vec![0xa4, 0x09, 0x4e, 0x00, 0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47, 0x63]
+        );
+    }
+
+    #[test]
     fn it_decodes_broadcast_data_zero_length() {
         let data = vec![0xa4, 0x00, 0x4e, 0xea];
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0xea,
                     data: None,
                     channel_id: None,
@@ -778,7 +843,7 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x04, 0x1a, 0x2e, 0xd9, 0xe4, 0xda, 0x10, 0x47]),
                     channel_id: None,
@@ -799,7 +864,7 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x84, 0x22, 0x06, 0x1d, 0xd0, 0x25, 0x05, 0x48]),
                     channel_id: None,
@@ -820,11 +885,11 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
                     channel_id: None,
-                    rssi: Some(BroadcastRSSI {
+                    rssi: Some(RSSI {
                         measurement_type: 0x10,
                         rssi: 0x01,
                         threshold_config: 0x6c,
@@ -845,11 +910,11 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
                     channel_id: None,
-                    rssi: Some(BroadcastRSSI {
+                    rssi: Some(RSSI {
                         measurement_type: 0x10,
                         rssi: 0x01,
                         threshold_config: 0x6a,
@@ -870,10 +935,10 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x01, 0x00, 0x20, 0x08, 0x60, 0xff, 0x00, 0x00]),
-                    channel_id: Some(BroadcastChannelID {
+                    channel_id: Some(ChannelID {
                         device_number: 0x6f53,
                         device_type: 0x23,
                         transmission_type: 0x65,
@@ -895,15 +960,15 @@ mod test {
         assert_eq!(
             Message::decode(&data),
             Ok((
-                Message::BroadcastData(BroadcastDataData {
+                Message::BroadcastData(DataPayload {
                     channel: 0,
                     data: Some([0x02, 0x00, 0x16, 0x0e, 0xc7, 0xdc, 0x00, 0x01]),
-                    channel_id: Some(BroadcastChannelID {
+                    channel_id: Some(ChannelID {
                         device_number: 0x6f53,
                         device_type: 0x23,
                         transmission_type: 0x65,
                     }),
-                    rssi: Some(BroadcastRSSI {
+                    rssi: Some(RSSI {
                         measurement_type: 0x10,
                         rssi: 0x01,
                         threshold_config: 0x6d,

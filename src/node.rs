@@ -180,7 +180,7 @@ impl Node {
 
     pub fn search(
         &mut self,
-    ) -> Result<(u8, crossbeam_channel::Receiver<message::BroadcastChannelID>), Error> {
+    ) -> Result<(u8, crossbeam_channel::Receiver<message::ChannelID>), Error> {
         let (search, receiver) = device::Search::new();
 
         let channel = self._assign_channel(Box::new(search))?;
@@ -453,7 +453,7 @@ impl Node {
                         println!("received: {}", message);
 
                         match message {
-                            Message::BroadcastData(data) => {
+                            Message::BroadcastData(data) | Message::AcknowledgedData(data) => {
                                 let assigned = assigned.read().unwrap();
                                 if let Some(assignment) = assigned.get(&data.channel) {
                                     let mut assignment = assignment.lock().unwrap();

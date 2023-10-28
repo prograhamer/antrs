@@ -14,6 +14,12 @@ impl<T> From<crossbeam_channel::TrySendError<T>> for Error {
     }
 }
 
+impl<T: num_enum::TryFromPrimitive> From<num_enum::TryFromPrimitiveError<T>> for Error {
+    fn from(_error: num_enum::TryFromPrimitiveError<T>) -> Self {
+        Error::InvalidValue
+    }
+}
+
 pub trait Device: DataProcessor {
     fn channel_type(&self) -> message::ChannelType;
     fn device_type(&self) -> u8;
@@ -26,7 +32,7 @@ pub trait Device: DataProcessor {
 }
 
 pub trait DataProcessor {
-    fn process_data(&mut self, data: message::BroadcastDataData) -> Result<(), Error>;
+    fn process_data(&mut self, data: message::DataPayload) -> Result<(), Error>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -42,15 +48,12 @@ impl std::fmt::Display for DevicePairing {
 }
 
 pub struct Search {
-    sender: crossbeam_channel::Sender<message::BroadcastChannelID>,
-    found: HashSet<message::BroadcastChannelID>,
+    sender: crossbeam_channel::Sender<message::ChannelID>,
+    found: HashSet<message::ChannelID>,
 }
 
 impl Search {
-    pub fn new() -> (
-        Search,
-        crossbeam_channel::Receiver<message::BroadcastChannelID>,
-    ) {
+    pub fn new() -> (Search, crossbeam_channel::Receiver<message::ChannelID>) {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let search = Search {
             sender,
@@ -61,7 +64,7 @@ impl Search {
 }
 
 impl DataProcessor for Search {
-    fn process_data(&mut self, data: message::BroadcastDataData) -> Result<(), Error> {
+    fn process_data(&mut self, data: message::DataPayload) -> Result<(), Error> {
         if let Some(id) = data.channel_id {
             if !self.found.contains(&id) {
                 self.sender.try_send(id)?;

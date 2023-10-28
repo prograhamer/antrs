@@ -67,6 +67,47 @@ impl TryFrom<u8> for TargetPowerStatus {
     }
 }
 
+pub fn target_power_message(channel: u8, power: u16) -> message::Message {
+    let (lsb, msb) = bytes::u16_to_u8(power);
+
+    message::Message::AcknowledgedData(message::DataPayload {
+        channel,
+        data: Some([0x31, 0xff, 0xff, 0xff, 0xff, 0xff, lsb, msb]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    })
+}
+
+pub fn user_configuration_message(
+    channel: u8,
+    user_weight: u16,
+    bike_weight: u16,
+    wheel_diameter: u16,
+) -> message::Message {
+    let (user_weight_lsb, user_weight_msb) = bytes::u16_to_u8(user_weight);
+    let wheel_diameter_dm = (wheel_diameter / 10).try_into().unwrap();
+    let wheel_offset: u8 = (wheel_diameter % 10).try_into().unwrap();
+    let (bike_weight_lsb, bike_weight_msb) = bytes::u16_to_u8(bike_weight & 0x0fff);
+
+    message::Message::AcknowledgedData(message::DataPayload {
+        channel,
+        data: Some([
+            0x37,
+            user_weight_lsb,
+            user_weight_msb,
+            0xff,
+            bike_weight_lsb | (wheel_offset << 4),
+            bike_weight_msb,
+            wheel_diameter_dm,
+            0,
+        ]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct FitnessEquipment {
     pairing: DevicePairing,
@@ -110,13 +151,8 @@ impl Device for FitnessEquipment {
 }
 
 impl DataProcessor for FitnessEquipment {
-    fn process_data(&mut self, data: message::BroadcastDataData) -> Result<(), Error> {
+    fn process_data(&mut self, data: message::DataPayload) -> Result<(), Error> {
         if let Some(data) = data.data {
-            let state = ((data[7] >> 4) & 0x07)
-                .try_into()
-                .or(Err(Error::InvalidValue))?;
-            let lap_toggle = bytes::test_bit(data[7], 7);
-
             let page = match data[0] {
                 16 => FitnessEquipmentData::Page16(Page16Data {
                     equipment_type: (data[1] & 0x1f).try_into().or(Err(Error::InvalidValue))?,
@@ -134,8 +170,10 @@ impl DataProcessor for FitnessEquipment {
                     distance_traveled_enabled: bytes::test_bit(data[7], 2),
                     virtual_speed_flag: bytes::test_bit(data[7], 3),
 
-                    state,
-                    lap_toggle,
+                    state: ((data[7] >> 4) & 0x07)
+                        .try_into()
+                        .or(Err(Error::InvalidValue))?,
+                    lap_toggle: bytes::test_bit(data[7], 7),
                 }),
                 25 => {
                     let instantaneous_power = match bytes::u8_to_u16(data[5], data[6] & 0x0f) {
@@ -159,8 +197,10 @@ impl DataProcessor for FitnessEquipment {
                         user_configuration_required: bytes::test_bit(data[6], 6),
                         target_power_status: (data[7] & 0x03).try_into()?,
 
-                        state,
-                        lap_toggle,
+                        state: ((data[7] >> 4) & 0x07)
+                            .try_into()
+                            .or(Err(Error::InvalidValue))?,
+                        lap_toggle: bytes::test_bit(data[7], 7),
                     })
                 }
                 26 => FitnessEquipmentData::Page26(Page26Data {
@@ -169,10 +209,52 @@ impl DataProcessor for FitnessEquipment {
                     wheel_period: bytes::u8_to_u16(data[3], data[4]),
                     accumulated_torque: bytes::u8_to_u16(data[5], data[6]),
 
-                    state,
-                    lap_toggle,
+                    state: ((data[7] >> 4) & 0x07)
+                        .try_into()
+                        .or(Err(Error::InvalidValue))?,
+                    lap_toggle: bytes::test_bit(data[7], 7),
                 }),
-                _ => return Ok(()),
+                54 => {
+                    let maximum_resistance = match bytes::u8_to_u16(data[5], data[6]) {
+                        0xffff => None,
+                        value => Some(value),
+                    };
+
+                    FitnessEquipmentData::Page54(Page54Data {
+                        maximum_resistance,
+                        basic_resistance: bytes::test_bit(data[7], 0),
+                        target_power: bytes::test_bit(data[7], 1),
+                        simulation: bytes::test_bit(data[7], 2),
+                    })
+                }
+                71 => {
+                    let command_id = data[1];
+                    let sequence_no = data[2];
+                    let command_status = message::CommandStatus::try_from(data[3])?;
+
+                    match command_id {
+                        49 => {
+                            let target_power = bytes::u8_to_u16(data[6], data[7]);
+                            FitnessEquipmentData::Page71(Page71Data {
+                                command_id,
+                                sequence_no,
+                                command_status,
+                                total_resistance: None,
+                                target_power: Some(target_power),
+                                wind_resistance_coefficient: None,
+                                wind_speed: None,
+                                drafting_factor: None,
+                                grade: None,
+                                rolling_resistance_coefficient: None,
+                            })
+                        }
+                        _ => return Ok(()),
+                    }
+                }
+                _ => {
+                    println!("received unhandled data page: {:?}", data);
+                    return Ok(());
+                }
             };
 
             self.sender.try_send(page)?;
@@ -231,42 +313,34 @@ pub struct Page26Data {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Page71Data {
+    pub command_id: u8,
+    pub sequence_no: u8,
+    pub command_status: message::CommandStatus,
+    pub total_resistance: Option<u8>,
+    pub target_power: Option<u16>,
+    pub wind_resistance_coefficient: Option<u8>,
+    pub wind_speed: Option<u8>,
+    pub drafting_factor: Option<u8>,
+    pub grade: Option<u16>,
+    pub rolling_resistance_coefficient: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Page54Data {
+    pub maximum_resistance: Option<u16>,
+    pub basic_resistance: bool,
+    pub target_power: bool,
+    pub simulation: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FitnessEquipmentData {
     Page16(Page16Data),
     Page25(Page25Data),
     Page26(Page26Data),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FitnessEquipmentDataOld {
-    page: Option<u8>,
-
-    // page 16 fields
-    pub equipment_type: Option<EquipmentType>,
-    /// measured in 250ms ticks, wraparound at 64s
-    pub elapsed_time: Option<u8>,
-    /// measured in metres, wraparound at 256m
-    pub distance_traveled: Option<u8>,
-    /// measured in mm/s, max 65.534m/s
-    pub speed: Option<u16>,
-    pub heart_rate: Option<u8>,
-    pub hr_data_source: Option<HRDataSource>,
-    pub distance_traveled_enabled: Option<bool>,
-    pub virtual_speed_flag: Option<bool>,
-
-    // page 25 fields
-    pub p25_update_event_count: Option<u8>,
-    pub cadence: Option<u8>,
-    pub accumulated_power: Option<u16>,
-    pub instantaneous_power: Option<u16>,
-    pub power_calibration_required: Option<bool>,
-    pub resistance_calibration_required: Option<bool>,
-    pub user_configuration_required: Option<bool>,
-    pub target_power_status: Option<TargetPowerStatus>,
-
-    // common fields
-    pub state: Option<EquipmentState>,
-    pub lap_toggle: Option<bool>,
+    Page54(Page54Data),
+    Page71(Page71Data),
 }
 
 #[cfg(test)]
@@ -276,39 +350,24 @@ mod test {
         Page25Data, Page26Data, TargetPowerStatus,
     };
     use crate::device::{DataProcessor, DevicePairing};
-    use crate::message;
-
-    const PAGE_16_TEST: message::BroadcastDataData = message::BroadcastDataData {
-        channel: 0,
-        data: Some([16, 25, 72, 150, 13, 20, 255, 36]),
-        channel_id: None,
-        rssi: None,
-        rx_timestamp: None,
-    };
-
-    const PAGE_25_TEST: message::BroadcastDataData = message::BroadcastDataData {
-        channel: 0,
-        data: Some([25, 244, 87, 99, 32, 2, 97, 32]),
-        channel_id: None,
-        rssi: None,
-        rx_timestamp: None,
-    };
-
-    const PAGE_26_TEST: message::BroadcastDataData = message::BroadcastDataData {
-        channel: 0,
-        data: Some([26, 247, 209, 140, 255, 239, 191, 32]),
-        channel_id: None,
-        rssi: None,
-        rx_timestamp: None,
-    };
+    use crate::message::{self, CommandStatus};
+    use crate::profile::fitness_equipment::{Page54Data, Page71Data};
 
     #[test]
     fn it_processes_page_16() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([16, 25, 72, 150, 13, 20, 255, 36]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
         let (mut fe, receiver) = new_paired(DevicePairing {
             device_id: 12345,
             transmission_type: 1,
         });
-        assert_eq!(fe.process_data(PAGE_16_TEST), Ok(()));
+        assert_eq!(fe.process_data(payload), Ok(()));
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
@@ -331,11 +390,19 @@ mod test {
 
     #[test]
     fn it_processes_page_25() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([25, 244, 87, 99, 32, 2, 97, 32]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
         let (mut fe, receiver) = new_paired(DevicePairing {
             device_id: 12345,
             transmission_type: 0,
         });
-        assert_eq!(fe.process_data(PAGE_25_TEST), Ok(()));
+        assert_eq!(fe.process_data(payload), Ok(()));
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
@@ -357,11 +424,19 @@ mod test {
 
     #[test]
     fn it_processes_page_26() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([26, 247, 209, 140, 255, 239, 191, 32]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
         let (mut fe, receiver) = new_paired(DevicePairing {
             device_id: 12345,
             transmission_type: 0,
         });
-        assert_eq!(fe.process_data(PAGE_26_TEST), Ok(()));
+        assert_eq!(fe.process_data(payload), Ok(()));
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
@@ -373,6 +448,93 @@ mod test {
 
                 state: EquipmentState::Ready,
                 lap_toggle: false
+            })
+        );
+    }
+
+    #[test]
+    fn it_processes_page_54() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([54, 0xff, 0xff, 0xff, 0xff, 0x10, 0x40, 0x03]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver.try_recv().unwrap();
+        assert_eq!(
+            data,
+            FitnessEquipmentData::Page54(Page54Data {
+                maximum_resistance: Some(0x4010),
+                basic_resistance: true,
+                target_power: true,
+                simulation: false,
+            })
+        );
+    }
+
+    #[test]
+    fn it_processes_page_54_no_resistance() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([54, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x06]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver.try_recv().unwrap();
+        assert_eq!(
+            data,
+            FitnessEquipmentData::Page54(Page54Data {
+                maximum_resistance: None,
+                basic_resistance: false,
+                target_power: true,
+                simulation: true,
+            })
+        );
+    }
+
+    #[test]
+    fn it_processes_page_71_after_target_power_command() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([71, 49, 1, 0, 255, 255, 200, 0]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver.try_recv().unwrap();
+        assert_eq!(
+            data,
+            FitnessEquipmentData::Page71(Page71Data {
+                command_id: 49,
+                sequence_no: 1,
+                command_status: CommandStatus::Pass,
+                total_resistance: None,
+                target_power: Some(200),
+                wind_resistance_coefficient: None,
+                wind_speed: None,
+                drafting_factor: None,
+                grade: None,
+                rolling_resistance_coefficient: None,
             })
         );
     }

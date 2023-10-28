@@ -171,7 +171,7 @@ impl Device for HeartRateMonitor {
 }
 
 impl DataProcessor for HeartRateMonitor {
-    fn process_data(&mut self, data: message::BroadcastDataData) -> Result<(), Error> {
+    fn process_data(&mut self, data: message::DataPayload) -> Result<(), Error> {
         if let Some(data) = data.data {
             if !self.data.page_toggle_observed {
                 if let Some(page) = self.data.page {
@@ -229,42 +229,42 @@ mod test {
     use crate::{device::DataProcessor, message};
     use core::time::Duration;
 
-    const PAGE_1_TEST: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_1_TEST: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([1, 83, 153, 1, 147, 80, 31, 73]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
     };
-    const PAGE_2_TEST: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_2_TEST: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([2, 1, 40, 0, 33, 11, 3, 71]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
     };
-    const PAGE_3_TEST: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_3_TEST: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([3, 4, 21, 7, 247, 75, 20, 64]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
     };
-    const PAGE_3_TEST_TOGGLE: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_3_TEST_TOGGLE: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([131, 4, 21, 7, 247, 75, 20, 64]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
     };
-    const PAGE_4_TEST: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_4_TEST: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([4, 27, 222, 94, 173, 98, 26, 63]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
     };
-    const PAGE_4_TEST_TOGGLE: message::BroadcastDataData = message::BroadcastDataData {
+    const PAGE_4_TEST_TOGGLE: message::DataPayload = message::DataPayload {
         channel: 0,
         data: Some([132, 27, 222, 94, 173, 98, 26, 63]),
         channel_id: None,
