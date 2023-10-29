@@ -3,7 +3,7 @@ use std::time::Duration;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::device::{DataProcessor, Device, DevicePairing, Error};
-use crate::{bytes, message};
+use crate::message;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, IntoPrimitive, TryFromPrimitive)]
@@ -187,19 +187,19 @@ impl DataProcessor for HeartRateMonitor {
                 page,
                 data[7],
                 data[6],
-                bytes::u8_to_u16(data[4], data[5]),
+                u16::from_le_bytes([data[4], data[5]]),
             );
 
             if self.data.page_toggle_observed {
                 match page {
                     1 => {
-                        let raw = bytes::u8_to_u32(data[1], data[2], data[3], 0);
+                        let raw = u32::from_le_bytes([data[1], data[2], data[3], 0]);
                         hr_data.cumulative_operating_time =
                             Some(Duration::from_secs((raw * 2).into()));
                     }
                     2 => {
                         hr_data.manufacturer_id = Some(data[1]);
-                        hr_data.serial_number = Some(bytes::u8_to_u16(data[2], data[3]));
+                        hr_data.serial_number = Some(u16::from_le_bytes([data[2], data[3]]));
                     }
                     3 => {
                         hr_data.hardware_version = Some(data[1]);
@@ -208,7 +208,7 @@ impl DataProcessor for HeartRateMonitor {
                     }
                     4 => {
                         hr_data.previous_heartbeat_event_time =
-                            Some(bytes::u8_to_u16(data[2], data[3]));
+                            Some(u16::from_le_bytes([data[2], data[3]]));
                     }
                     _ => {
                         return Err(Error::InvalidValue);

@@ -3,8 +3,6 @@ pub mod reader;
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::bytes;
-
 pub const SYNC: u8 = 0xa4;
 
 #[repr(u8)]
@@ -375,7 +373,7 @@ pub struct SetChannelIDData {
 
 impl SetChannelIDData {
     fn encode(&self) -> Vec<u8> {
-        let (device_lo, device_hi) = bytes::u16_to_u8(self.device);
+        let [device_lo, device_hi] = self.device.to_le_bytes();
         let mut device_type_byte: u8 = if self.pairing { 0x80 } else { 0x00 };
         device_type_byte |= self.device_type & 0x7f;
 
@@ -400,7 +398,7 @@ pub struct SetChannelPeriodData {
 
 impl SetChannelPeriodData {
     fn encode(&self) -> Vec<u8> {
-        let (period_lo, period_hi) = bytes::u16_to_u8(self.period);
+        let [period_lo, period_hi] = self.period.to_le_bytes();
         vec![
             SYNC,
             3,
@@ -601,7 +599,7 @@ impl Message {
 
                     if data_len >= 14 && flag.contains(ExtendedDataFlag::CHANNEL_ID) {
                         channel_id = Some(ChannelID {
-                            device_number: bytes::u8_to_u16(data[base], data[base + 1]),
+                            device_number: u16::from_le_bytes([data[base], data[base + 1]]),
                             device_type: data[base + 2],
                             transmission_type: data[base + 3],
                         });
@@ -618,7 +616,7 @@ impl Message {
                         base += 4;
                     }
                     if base + 2 <= data_len + 3 && flag.contains(ExtendedDataFlag::RX_TIMESTAMP) {
-                        rx_timestamp = Some(bytes::u8_to_u16(data[base], data[base + 1]));
+                        rx_timestamp = Some(u16::from_le_bytes([data[base], data[base + 1]]));
                     }
                 }
 
@@ -696,7 +694,7 @@ impl Message {
             }
             MessageID::ResetSystem => Message::ResetSystem,
             MessageID::SetChannelID => {
-                let device = bytes::u8_to_u16(data[4], data[5]);
+                let device = u16::from_le_bytes([data[4], data[5]]);
                 let pairing = (data[6] & 0x80) == 0x80;
                 let device_type = data[6] & 0x7f;
 
@@ -709,7 +707,7 @@ impl Message {
                 })
             }
             MessageID::SetChannelPeriod => {
-                let period = bytes::u8_to_u16(data[4], data[5]);
+                let period = u16::from_le_bytes([data[4], data[5]]);
 
                 Message::SetChannelPeriod(SetChannelPeriodData {
                     channel: data[3],

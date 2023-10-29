@@ -1,7 +1,7 @@
 use num_enum::TryFromPrimitive;
 
 use crate::device::{DataProcessor, Device, DevicePairing, Error};
-use crate::{bytes, message};
+use crate::message;
 use log::warn;
 
 #[repr(u8)]
@@ -69,11 +69,11 @@ impl TryFrom<u8> for TargetPowerStatus {
 }
 
 pub fn target_power_message(channel: u8, power: u16) -> message::Message {
-    let (lsb, msb) = bytes::u16_to_u8(power);
+    let [power_lsb, power_msb] = power.to_le_bytes();
 
     message::Message::AcknowledgedData(message::DataPayload {
         channel,
-        data: Some([0x31, 0xff, 0xff, 0xff, 0xff, 0xff, lsb, msb]),
+        data: Some([0x31, 0xff, 0xff, 0xff, 0xff, 0xff, power_lsb, power_msb]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
@@ -86,10 +86,10 @@ pub fn user_configuration_message(
     bike_weight: u16,
     wheel_diameter: u16,
 ) -> message::Message {
-    let (user_weight_lsb, user_weight_msb) = bytes::u16_to_u8(user_weight);
+    let [user_weight_lsb, user_weight_msb] = user_weight.to_le_bytes();
     let wheel_diameter_dm = (wheel_diameter / 10).try_into().unwrap();
     let wheel_offset: u8 = (wheel_diameter % 10).try_into().unwrap();
-    let (bike_weight_lsb, bike_weight_msb) = bytes::u16_to_u8(bike_weight & 0x0fff);
+    let [bike_weight_lsb, bike_weight_msb] = (bike_weight & 0x0fff).to_le_bytes();
 
     message::Message::AcknowledgedData(message::DataPayload {
         channel,
@@ -159,7 +159,7 @@ impl DataProcessor for FitnessEquipment {
                     equipment_type: (data[1] & 0x1f).try_into().or(Err(Error::InvalidValue))?,
                     elapsed_time: data[2],
                     distance_traveled: data[3],
-                    speed: match bytes::u8_to_u16(data[4], data[5]) {
+                    speed: match u16::from_le_bytes([data[4], data[5]]) {
                         0xffff => None,
                         speed => Some(speed),
                     },
@@ -168,16 +168,14 @@ impl DataProcessor for FitnessEquipment {
                         hr => Some(hr),
                     },
                     hr_data_source: (data[7] & 0x03).try_into()?,
-                    distance_traveled_enabled: bytes::test_bit(data[7], 2),
-                    virtual_speed_flag: bytes::test_bit(data[7], 3),
+                    distance_traveled_enabled: data[7] & (1 << 2) != 0,
+                    virtual_speed_flag: data[7] & (1 << 3) != 0,
 
-                    state: ((data[7] >> 4) & 0x07)
-                        .try_into()
-                        .or(Err(Error::InvalidValue))?,
-                    lap_toggle: bytes::test_bit(data[7], 7),
+                    state: ((data[7] >> 4) & 0x07).try_into()?,
+                    lap_toggle: data[7] & (1 << 7) != 0,
                 }),
                 25 => {
-                    let instantaneous_power = match bytes::u8_to_u16(data[5], data[6] & 0x0f) {
+                    let instantaneous_power = match u16::from_le_bytes([data[5], data[6] & 0x0f]) {
                         0xfff => None,
                         power => Some(power),
                     };
@@ -190,42 +188,38 @@ impl DataProcessor for FitnessEquipment {
                         accumulated_power: if instantaneous_power.is_none() {
                             None
                         } else {
-                            Some(bytes::u8_to_u16(data[3], data[4]))
+                            Some(u16::from_le_bytes([data[3], data[4]]))
                         },
                         instantaneous_power,
-                        power_calibration_required: bytes::test_bit(data[6], 4),
-                        resistance_calibration_required: bytes::test_bit(data[6], 5),
-                        user_configuration_required: bytes::test_bit(data[6], 6),
+                        power_calibration_required: data[6] & 1 << 4 != 0,
+                        resistance_calibration_required: data[6] & (1 << 5) != 0,
+                        user_configuration_required: data[6] & (1 << 6) != 0,
                         target_power_status: (data[7] & 0x03).try_into()?,
 
-                        state: ((data[7] >> 4) & 0x07)
-                            .try_into()
-                            .or(Err(Error::InvalidValue))?,
-                        lap_toggle: bytes::test_bit(data[7], 7),
+                        state: ((data[7] >> 4) & 0x07).try_into()?,
+                        lap_toggle: data[7] & (1 << 7) != 0,
                     })
                 }
                 26 => FitnessEquipmentData::StationaryBikeTorque(TorqueData {
                     update_event_count: data[1],
                     wheel_revolutions: data[2],
-                    wheel_period: bytes::u8_to_u16(data[3], data[4]),
-                    accumulated_torque: bytes::u8_to_u16(data[5], data[6]),
+                    wheel_period: u16::from_le_bytes([data[3], data[4]]),
+                    accumulated_torque: u16::from_le_bytes([data[5], data[6]]),
 
-                    state: ((data[7] >> 4) & 0x07)
-                        .try_into()
-                        .or(Err(Error::InvalidValue))?,
-                    lap_toggle: bytes::test_bit(data[7], 7),
+                    state: ((data[7] >> 4) & 0x07).try_into()?,
+                    lap_toggle: data[7] & (1 << 7) != 0,
                 }),
                 54 => {
-                    let maximum_resistance = match bytes::u8_to_u16(data[5], data[6]) {
+                    let maximum_resistance = match u16::from_le_bytes([data[5], data[6]]) {
                         0xffff => None,
                         value => Some(value),
                     };
 
                     FitnessEquipmentData::Capabilities(CapabilitiesData {
                         maximum_resistance,
-                        basic_resistance: bytes::test_bit(data[7], 0),
-                        target_power: bytes::test_bit(data[7], 1),
-                        simulation: bytes::test_bit(data[7], 2),
+                        basic_resistance: data[7] & (1 << 0) != 0,
+                        target_power: data[7] & (1 << 1) != 0,
+                        simulation: data[7] & (1 << 2) != 0,
                     })
                 }
                 71 => {
@@ -235,7 +229,7 @@ impl DataProcessor for FitnessEquipment {
 
                     match command_id {
                         49 => {
-                            let target_power = bytes::u8_to_u16(data[6], data[7]);
+                            let target_power = u16::from_le_bytes([data[6], data[7]]);
                             FitnessEquipmentData::CommandStatus(CommandStatusData {
                                 command_id,
                                 sequence_no,
