@@ -154,7 +154,7 @@ impl DataProcessor for FitnessEquipment {
     fn process_data(&mut self, data: message::DataPayload) -> Result<(), Error> {
         if let Some(data) = data.data {
             let page = match data[0] {
-                16 => FitnessEquipmentData::Page16(Page16Data {
+                16 => FitnessEquipmentData::General(GeneralData {
                     equipment_type: (data[1] & 0x1f).try_into().or(Err(Error::InvalidValue))?,
                     elapsed_time: data[2],
                     distance_traveled: data[3],
@@ -180,7 +180,7 @@ impl DataProcessor for FitnessEquipment {
                         0xfff => None,
                         power => Some(power),
                     };
-                    FitnessEquipmentData::Page25(Page25Data {
+                    FitnessEquipmentData::StationaryBike(StationaryBikeData {
                         update_event_count: data[1],
                         cadence: match data[2] {
                             0xff => None,
@@ -203,7 +203,7 @@ impl DataProcessor for FitnessEquipment {
                         lap_toggle: bytes::test_bit(data[7], 7),
                     })
                 }
-                26 => FitnessEquipmentData::Page26(Page26Data {
+                26 => FitnessEquipmentData::StationaryBikeTorque(TorqueData {
                     update_event_count: data[1],
                     wheel_revolutions: data[2],
                     wheel_period: bytes::u8_to_u16(data[3], data[4]),
@@ -220,7 +220,7 @@ impl DataProcessor for FitnessEquipment {
                         value => Some(value),
                     };
 
-                    FitnessEquipmentData::Page54(Page54Data {
+                    FitnessEquipmentData::Capabilities(CapabilitiesData {
                         maximum_resistance,
                         basic_resistance: bytes::test_bit(data[7], 0),
                         target_power: bytes::test_bit(data[7], 1),
@@ -235,7 +235,7 @@ impl DataProcessor for FitnessEquipment {
                     match command_id {
                         49 => {
                             let target_power = bytes::u8_to_u16(data[6], data[7]);
-                            FitnessEquipmentData::Page71(Page71Data {
+                            FitnessEquipmentData::CommandStatus(CommandStatusData {
                                 command_id,
                                 sequence_no,
                                 command_status,
@@ -264,7 +264,7 @@ impl DataProcessor for FitnessEquipment {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Page16Data {
+pub struct GeneralData {
     pub equipment_type: EquipmentType,
     /// measured in 250ms ticks, wraparound at 64s
     pub elapsed_time: u8,
@@ -283,7 +283,7 @@ pub struct Page16Data {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Page25Data {
+pub struct StationaryBikeData {
     pub update_event_count: u8,
     pub cadence: Option<u8>,
     pub accumulated_power: Option<u16>,
@@ -299,7 +299,7 @@ pub struct Page25Data {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Page26Data {
+pub struct TorqueData {
     pub update_event_count: u8,
     pub wheel_revolutions: u8,
     /// measured in 1/2048s, wraps around at 32s
@@ -313,7 +313,7 @@ pub struct Page26Data {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Page71Data {
+pub struct CommandStatusData {
     pub command_id: u8,
     pub sequence_no: u8,
     pub command_status: message::CommandStatus,
@@ -327,7 +327,7 @@ pub struct Page71Data {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Page54Data {
+pub struct CapabilitiesData {
     pub maximum_resistance: Option<u16>,
     pub basic_resistance: bool,
     pub target_power: bool,
@@ -336,22 +336,22 @@ pub struct Page54Data {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FitnessEquipmentData {
-    Page16(Page16Data),
-    Page25(Page25Data),
-    Page26(Page26Data),
-    Page54(Page54Data),
-    Page71(Page71Data),
+    General(GeneralData),
+    StationaryBike(StationaryBikeData),
+    StationaryBikeTorque(TorqueData),
+    Capabilities(CapabilitiesData),
+    CommandStatus(CommandStatusData),
 }
 
 #[cfg(test)]
 mod test {
     use super::{
-        new_paired, EquipmentState, EquipmentType, FitnessEquipmentData, HRDataSource, Page16Data,
-        Page25Data, Page26Data, TargetPowerStatus,
+        new_paired, EquipmentState, EquipmentType, FitnessEquipmentData, GeneralData, HRDataSource,
+        StationaryBikeData, TargetPowerStatus, TorqueData,
     };
     use crate::device::{DataProcessor, DevicePairing};
     use crate::message::{self, CommandStatus};
-    use crate::profile::fitness_equipment::{Page54Data, Page71Data};
+    use crate::profile::fitness_equipment::{CapabilitiesData, CommandStatusData};
 
     #[test]
     fn it_processes_page_16() {
@@ -371,7 +371,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page16(Page16Data {
+            FitnessEquipmentData::General(GeneralData {
                 equipment_type: EquipmentType::StationaryBike,
                 elapsed_time: 72,
                 distance_traveled: 150,
@@ -406,7 +406,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page25(Page25Data {
+            FitnessEquipmentData::StationaryBike(StationaryBikeData {
                 update_event_count: 244,
                 cadence: Some(87),
                 accumulated_power: Some(8291),
@@ -440,7 +440,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page26(Page26Data {
+            FitnessEquipmentData::StationaryBikeTorque(TorqueData {
                 update_event_count: 247,
                 wheel_revolutions: 209,
                 wheel_period: 65420,
@@ -470,7 +470,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page54(Page54Data {
+            FitnessEquipmentData::Capabilities(CapabilitiesData {
                 maximum_resistance: Some(0x4010),
                 basic_resistance: true,
                 target_power: true,
@@ -497,7 +497,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page54(Page54Data {
+            FitnessEquipmentData::Capabilities(CapabilitiesData {
                 maximum_resistance: None,
                 basic_resistance: false,
                 target_power: true,
@@ -524,7 +524,7 @@ mod test {
         let data = receiver.try_recv().unwrap();
         assert_eq!(
             data,
-            FitnessEquipmentData::Page71(Page71Data {
+            FitnessEquipmentData::CommandStatus(CommandStatusData {
                 command_id: 49,
                 sequence_no: 1,
                 command_status: CommandStatus::Pass,
