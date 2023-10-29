@@ -1,4 +1,5 @@
 use crossbeam_channel::select;
+use log::info;
 use std::thread;
 use std::time::Duration;
 
@@ -6,6 +7,10 @@ use antrs::node;
 use antrs::profile::heart_rate_monitor;
 
 fn main() -> Result<(), node::Error> {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
+
     let key: [u8; 8] = match std::env::var("ANT_NETWORK_KEY") {
         Ok(key) => match hex::decode(key) {
             Ok(key) => match key.try_into() {
@@ -38,12 +43,12 @@ fn main() -> Result<(), node::Error> {
         select! {
             recv(hrm_receiver) -> data => {
                 if let Ok(data) = data {
-                    println!("Received data from HRM, heart rate = {}", data.computed_heart_rate);
+                    info!("Received data from HRM, heart rate = {}", data.computed_heart_rate);
                 }
             }
             recv(hrm_receiver2) -> data => {
                 if let Ok(data) = data {
-                    println!("Received data from HRM #2, heart rate = {}", data.computed_heart_rate);
+                    info!("Received data from HRM #2, heart rate = {}", data.computed_heart_rate);
                 }
             }
         }

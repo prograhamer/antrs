@@ -1,8 +1,13 @@
 use std::thread;
 
 use antrs::node;
+use log::info;
 
 fn main() -> Result<(), node::Error> {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
+
     let key: [u8; 8] = match std::env::var("ANT_NETWORK_KEY") {
         Ok(key) => match hex::decode(key) {
             Ok(key) => match key.try_into() {
@@ -20,18 +25,19 @@ fn main() -> Result<(), node::Error> {
     node.open()?;
 
     let (channel, receiver) = node.search()?;
+    info!("channel {} assigned for search", channel);
 
     let h = thread::spawn(move || {
         for id in receiver.iter() {
-            println!("received device ID: {:?}", id);
+            info!("received device ID: {:?}", id);
         }
-        println!("receiver disconnected");
+        info!("receiver disconnected");
     });
 
     h.join().unwrap();
 
     if let Some((status, events)) = node.channel_status(channel) {
-        println!("channel status: {:?}, events: {:?}", status, events);
+        info!("channel status: {:?}, events: {:?}", status, events);
     }
     node.close()?;
 

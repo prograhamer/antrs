@@ -1,3 +1,4 @@
+use log::{error, info};
 use std::thread;
 use std::time::Duration;
 
@@ -6,6 +7,10 @@ use antrs::profile::fitness_equipment;
 use antrs::{message, node};
 
 fn main() {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
+
     let key: [u8; 8] = match std::env::var("ANT_NETWORK_KEY") {
         Ok(key) => match hex::decode(key) {
             Ok(key) => match key.try_into() {
@@ -32,11 +37,11 @@ fn main() {
         Ok(channel) => channel,
         Err(e) => panic!("failed to assign channel: {}", e),
     };
-    println!("opened channel #{}", channel);
+    info!("opened channel #{}", channel);
 
     thread::spawn(move || loop {
         for data in receiver.iter() {
-            println!("received data from trainer: {:?}", data);
+            info!("received data from trainer: {:?}", data);
         }
     });
 
@@ -44,19 +49,19 @@ fn main() {
 
     let request_capabilites = message::request_data_page(channel, 54);
     if let Err(e) = node.write_message(request_capabilites, Duration::from_secs(1)) {
-        println!("failed to write messgae: {}", e);
+        error!("failed to write messgae: {}", e);
     }
 
     thread::sleep(Duration::from_secs(10));
 
     let erg = fitness_equipment::target_power_message(channel, 200);
     if let Err(e) = node.write_message(erg, Duration::from_secs(1)) {
-        println!("failed to write message: {}", e);
+        error!("failed to write message: {}", e);
     }
     thread::sleep(Duration::from_secs(1));
     let request_command_status = message::request_data_page(channel, 71);
     if let Err(e) = node.write_message(request_command_status, Duration::from_secs(1)) {
-        println!("failed to write message: {}", e);
+        error!("failed to write message: {}", e);
     }
 
     thread::sleep(Duration::from_secs(30));

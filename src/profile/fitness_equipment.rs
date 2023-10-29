@@ -2,6 +2,7 @@ use num_enum::TryFromPrimitive;
 
 use crate::device::{DataProcessor, Device, DevicePairing, Error};
 use crate::{bytes, message};
+use log::warn;
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, TryFromPrimitive)]
@@ -252,7 +253,7 @@ impl DataProcessor for FitnessEquipment {
                     }
                 }
                 _ => {
-                    println!("received unhandled data page: {:?}", data);
+                    warn!("received unhandled data page: {:?}", data);
                     return Ok(());
                 }
             };

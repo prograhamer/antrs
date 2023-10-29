@@ -1,6 +1,7 @@
 mod capabilities;
 
 use core::time::Duration;
+use log::{error, trace};
 use std::collections::{hash_map, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -21,6 +22,7 @@ pub enum Error {
     NoAvailableChannel,
     CapabilitiesNotInitialized,
     ExtendedMessagesNotSupported,
+    ChannelDisconnected,
 }
 
 impl From<rusb::Error> for Error {
@@ -28,6 +30,15 @@ impl From<rusb::Error> for Error {
         match value {
             rusb::Error::Timeout => Error::Timeout,
             _ => Error::USBError(value),
+        }
+    }
+}
+
+impl From<crossbeam_channel::RecvTimeoutError> for Error {
+    fn from(value: crossbeam_channel::RecvTimeoutError) -> Self {
+        match value {
+            crossbeam_channel::RecvTimeoutError::Timeout => Error::Timeout,
+            crossbeam_channel::RecvTimeoutError::Disconnected => Error::ChannelDisconnected,
         }
     }
 }
@@ -91,6 +102,8 @@ impl Node {
             .clone()
             .ok_or(Error::DeviceNotInitialized)?
             .open()?;
+
+        handle.reset()?;
 
         handle.set_auto_detach_kernel_driver(true)?;
         handle.set_active_configuration(0)?;
@@ -394,13 +407,8 @@ impl Node {
         after: F,
     ) -> Result<Message, Error> {
         let receiver = self.notify(matcher);
-
         (after)()?;
-
-        receiver.recv_timeout(timeout).map_err(|e| match e {
-            crossbeam_channel::RecvTimeoutError::Timeout => Error::Timeout,
-            crossbeam_channel::RecvTimeoutError::Disconnected => panic!("receiver disconnected"),
-        })
+        Ok(receiver.recv_timeout(timeout)?)
     }
 
     fn notify(
@@ -438,7 +446,7 @@ impl Node {
                     if (notifier.matcher)(message) {
                         to_delete.push(index);
                         if let Err(e) = notifier.sender.try_send(message) {
-                            println!("failed to notify of message: {:?}: {}", message, e)
+                            error!("failed to notify of message: {:?}: {}", message, e)
                         }
                     }
                 }
@@ -450,7 +458,7 @@ impl Node {
             loop {
                 match rx.recv() {
                     Ok(message) => {
-                        println!("received: {}", message);
+                        trace!("received: {}", message);
 
                         match message {
                             Message::BroadcastData(data) | Message::AcknowledgedData(data) => {
@@ -459,7 +467,7 @@ impl Node {
                                     let mut assignment = assignment.lock().unwrap();
                                     if let Some(ref mut device) = assignment.device {
                                         if let Err(e) = device.process_data(data) {
-                                            println!("Error processing data: {:?}", e);
+                                            error!("Error processing data: {:?}", e);
                                         }
                                     }
                                 }
@@ -484,7 +492,7 @@ impl Node {
                         }
                     }
                     Err(_) => {
-                        println!("error receiving from publisher");
+                        error!("error receiving from publisher");
                         break;
                     }
                 }
@@ -511,7 +519,7 @@ impl Node {
     pub fn write_message(&self, message: message::Message, timeout: Duration) -> Result<(), Error> {
         self.write(message.encode().as_ref(), timeout)?;
 
-        println!("sent: {}", message);
+        trace!("sent: {}", message);
         Ok(())
     }
 

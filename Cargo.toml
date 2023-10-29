@@ -9,5 +9,9 @@ edition = "2021"
 bitflags = "2.4.0"
 crossbeam-channel = "0.5.8"
 hex = "0.4.3"
+log = { version = "0.4.20" }
 num_enum = "0.7.0"
 rusb = "0.9.3"
+
+[dev-dependencies]
+env_logger = "0.10.0"

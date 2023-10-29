@@ -1,5 +1,6 @@
 use crate::node;
 use core::time::Duration;
+use log::warn;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -89,7 +90,7 @@ impl Publisher<'_> {
                 }
 
                 if discard_count > 0 {
-                    println!("discarded {} bytes!", discard_count);
+                    warn!("discarded {} bytes!", discard_count);
                 }
 
                 while buffer.read_index + 5 < buffer.write_index {
