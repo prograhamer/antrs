@@ -80,6 +80,30 @@ pub fn target_power_message(channel: u8, power: u16) -> message::Message {
     })
 }
 
+pub fn wind_resistance_message(
+    channel: u8,
+    wind_resistance_coefficient: u8,
+    wind_speed: u8,
+    drafting_factor: u8,
+) -> message::Message {
+    message::Message::AcknowledgedData(message::DataPayload {
+        channel,
+        data: Some([
+            0x32,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            wind_resistance_coefficient,
+            wind_speed,
+            drafting_factor,
+        ]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    })
+}
+
 pub fn user_configuration_message(
     channel: u8,
     user_weight: u16,
@@ -249,6 +273,11 @@ impl DataProcessor for FitnessEquipment {
                                         response_data[2],
                                         response_data[3],
                                     ]));
+                                } else if command_id == 50 {
+                                    command_status_data.wind_resistance_coefficient =
+                                        Some(response_data[1]);
+                                    command_status_data.wind_speed = Some(response_data[2]);
+                                    command_status_data.drafting_factor = Some(response_data[3]);
                                 }
                                 FitnessEquipmentData::CommandStatus(command_status_data)
                             }
@@ -538,6 +567,39 @@ mod test {
                 wind_resistance_coefficient: None,
                 wind_speed: None,
                 drafting_factor: None,
+                grade: None,
+                rolling_resistance_coefficient: None,
+            })
+        );
+    }
+
+    #[test]
+    fn it_processes_page_71_after_wind_resistance_command() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([71, 50, 1, 0, 255, 40, 127, 100]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver.try_recv().unwrap();
+        assert_eq!(
+            data,
+            FitnessEquipmentData::CommandStatus(CommandStatusData {
+                command_id: 50,
+                sequence_no: 1,
+                command_status: CommandStatus::Pass,
+                total_resistance: None,
+                target_power: None,
+                wind_resistance_coefficient: Some(40),
+                wind_speed: Some(127),
+                drafting_factor: Some(100),
                 grade: None,
                 rolling_resistance_coefficient: None,
             })
