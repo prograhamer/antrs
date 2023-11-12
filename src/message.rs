@@ -26,6 +26,7 @@ pub enum MessageID {
     ChannelResponseEvent = 0x40,
     AssignChannel = 0x42,
     SetChannelPeriod = 0x43,
+    SetChannelSearchTimeout = 0x44,
     SetChannelRFFrequency = 0x45,
     SetNetworkKey = 0x46,
     ResetSystem = 0x4a,
@@ -267,6 +268,26 @@ impl CapabilitiesData {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetChannelSearchTimeoutData {
+    pub channel: u8,
+    /// timeout in 2.5 second increments
+    /// 0 disables high priority search, and 255 sets no timeout
+    pub timeout: u8,
+}
+
+impl SetChannelSearchTimeoutData {
+    fn encode(&self) -> Vec<u8> {
+        vec![
+            SYNC,
+            2,
+            MessageID::SetChannelSearchTimeout.into(),
+            self.channel,
+            self.timeout,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelResponseEventData {
     pub channel: u8,
     pub message_id: MessageID,
@@ -497,6 +518,7 @@ pub enum Message {
     SetChannelID(SetChannelIDData),
     SetChannelPeriod(SetChannelPeriodData),
     SetChannelRFFrequency(SetChannelRFFrequencyData),
+    SetChannelSearchTimeout(SetChannelSearchTimeoutData),
     SetNetworkKey(SetNetworkKeyData),
     StartupMessage(StartupMessageData),
 }
@@ -524,6 +546,7 @@ impl Message {
             Message::SetChannelID(base) => base.encode(),
             Message::SetChannelPeriod(base) => base.encode(),
             Message::SetChannelRFFrequency(base) => base.encode(),
+            Message::SetChannelSearchTimeout(base) => base.encode(),
             Message::SetNetworkKey(base) => base.encode(),
             Message::StartupMessage(base) => base.encode(),
         };
@@ -672,6 +695,12 @@ impl Message {
                     channel: data[3],
                     message_id,
                     message_code,
+                })
+            }
+            MessageID::SetChannelSearchTimeout => {
+                Message::SetChannelSearchTimeout(SetChannelSearchTimeoutData {
+                    channel: data[3],
+                    timeout: data[4],
                 })
             }
             MessageID::CloseChannel => Message::CloseChannel(CloseChannelData { channel: data[3] }),
@@ -1262,6 +1291,30 @@ mod test {
                 Message::SetChannelRFFrequency(SetChannelRFFrequencyData {
                     channel: 2,
                     frequency: 57,
+                }),
+                6
+            ))
+        );
+    }
+
+    #[test]
+    fn it_encodes_set_channel_search_timeout() {
+        let message = Message::SetChannelSearchTimeout(SetChannelSearchTimeoutData {
+            channel: 2,
+            timeout: 240, // 600 seconds = 240 * 2.5
+        });
+        assert_eq!(message.encode(), vec![SYNC, 0x02, 0x44, 0x02, 0xf0, 0x10])
+    }
+
+    #[test]
+    fn it_decodes_set_channel_search_timeout() {
+        let data = [SYNC, 0x02, 0x44, 0x02, 0xf0, 0x10];
+        assert_eq!(
+            Message::decode(&data),
+            Ok((
+                Message::SetChannelSearchTimeout(SetChannelSearchTimeoutData {
+                    channel: 2,
+                    timeout: 240,
                 }),
                 6
             ))
