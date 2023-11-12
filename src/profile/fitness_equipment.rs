@@ -68,6 +68,9 @@ impl TryFrom<u8> for TargetPowerStatus {
     }
 }
 
+/// Create a target power (erg mode) command message.
+///
+/// Power is expressed in 0.25W increments, so a target power of 400 = 100W.
 pub fn target_power_message(channel: u8, power: u16) -> message::Message {
     let [power_lsb, power_msb] = power.to_le_bytes();
 
@@ -80,6 +83,51 @@ pub fn target_power_message(channel: u8, power: u16) -> message::Message {
     })
 }
 
+/// Create a track resistance command message.
+///
+/// Grade is percent grade in 0.01% increments, with an offset of -200.00%. I.e. a grade value of
+/// 20,000 = 0% grade.
+/// A value of 0xffff means use default value of 0% grade (flat).
+///
+/// Coefficient of rolling resistance is expressed in increments of 5*10^-5
+/// A value of 0xff means use the default of 0.004 (bicycle tires on asphalt road).
+pub fn track_resistance_message(
+    channel: u8,
+    grade: u16,
+    coefficient_of_rolling_resistance: u8,
+) -> message::Message {
+    let [grade_lsb, grade_msb] = grade.to_le_bytes();
+
+    message::Message::AcknowledgedData(message::DataPayload {
+        channel,
+        data: Some([
+            0x33,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            grade_lsb,
+            grade_msb,
+            coefficient_of_rolling_resistance,
+        ]),
+        channel_id: None,
+        rssi: None,
+        rx_timestamp: None,
+    })
+}
+
+/// Create a wind resistance command message.
+///
+/// Wind resistance coefficient = frontal area (m^2) * drag coefficient * air density (kg/m^3)
+/// Value of 0xff means use default setting.
+///
+/// Wind speed in km/h with offset -127. E.g. 127 = 0km/h, 0 = 127km/h tail wind, 254 = 127km/h
+/// head wind.
+/// Value of 0xff means use default setting.
+///
+/// Drafting factor on a scale of 0.00-1.00 in 0.01 increments. 0 removes all air resistance
+/// and 1 applies no drafting effect.
+/// Value of 0xff means use default setting.
 pub fn wind_resistance_message(
     channel: u8,
     wind_resistance_coefficient: u8,
