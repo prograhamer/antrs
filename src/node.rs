@@ -67,6 +67,7 @@ struct MessageNotifier {
 pub enum ChannelStatus {
     Assigned,
     Open,
+    Closing,
     Closed,
 }
 
@@ -102,8 +103,6 @@ impl Node {
             .clone()
             .ok_or(Error::DeviceNotInitialized)?
             .open()?;
-
-        handle.reset()?;
 
         handle.set_auto_detach_kernel_driver(true)?;
         handle.set_active_configuration(0)?;
@@ -157,22 +156,45 @@ impl Node {
             self.close_channel(channel)?;
         }
 
+        let mut handle = self.handle.write().unwrap();
+        if let Some(ref mut handle) = *handle {
+            handle.reset()?;
+        }
+
         Ok(())
     }
 
     pub fn close_channel(&mut self, channel: u8) -> Result<(), Error> {
         let assigned = self.assigned.read().unwrap();
         if let Some(assignment) = assigned.get(&channel) {
-            let assignment = assignment.lock().unwrap();
-            if assignment.status != ChannelStatus::Closed {
-                self.expect_channel_response_no_error_after(
-                    channel,
-                    MessageID::CloseChannel,
-                    Duration::from_millis(1000),
+            let mut assignment = assignment.lock().unwrap();
+            if assignment.status == ChannelStatus::Open {
+                assignment.status = ChannelStatus::Closing;
+                drop(assignment);
+
+                self.wait_for_message_after(
+                    Box::new(move |message| {
+                        if let Message::ChannelResponseEvent(data) = message {
+                            data.channel == channel
+                                && data.message_id == MessageID::ChannelEvent
+                                && data.message_code == MessageCode::EventChannelClosed
+                        } else {
+                            false
+                        }
+                    }),
+                    Duration::from_secs(1),
                     || {
-                        self.write_message(
-                            Message::CloseChannel(message::CloseChannelData { channel }),
-                            Duration::from_millis(100),
+                        self.expect_channel_response_no_error_after(
+                            channel,
+                            MessageID::CloseChannel,
+                            Duration::from_millis(1000),
+                            || {
+                                self.write_message(
+                                    Message::CloseChannel(message::CloseChannelData { channel }),
+                                    Duration::from_millis(100),
+                                )?;
+                                Ok(())
+                            },
                         )
                     },
                 )?;
