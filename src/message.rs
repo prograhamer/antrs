@@ -1,3 +1,4 @@
+pub mod common;
 pub mod reader;
 
 use bitflags::bitflags;

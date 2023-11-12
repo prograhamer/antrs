@@ -222,33 +222,42 @@ impl DataProcessor for FitnessEquipment {
                         simulation: data[7] & (1 << 2) != 0,
                     })
                 }
-                71 => {
-                    let command_id = data[1];
-                    let sequence_no = data[2];
-                    let command_status = message::CommandStatus::try_from(data[3])?;
-
-                    match command_id {
-                        49 => {
-                            let target_power = u16::from_le_bytes([data[6], data[7]]);
-                            FitnessEquipmentData::CommandStatus(CommandStatusData {
+                _ => {
+                    if let Some(common_data) = message::common::decode(data) {
+                        match common_data {
+                            message::common::DataPage::CommandStatus {
                                 command_id,
                                 sequence_no,
                                 command_status,
-                                total_resistance: None,
-                                target_power: Some(target_power),
-                                wind_resistance_coefficient: None,
-                                wind_speed: None,
-                                drafting_factor: None,
-                                grade: None,
-                                rolling_resistance_coefficient: None,
-                            })
+                                response_data,
+                            } => {
+                                let mut command_status_data = CommandStatusData {
+                                    command_id,
+                                    sequence_no,
+                                    command_status,
+                                    total_resistance: None,
+                                    target_power: None,
+                                    wind_resistance_coefficient: None,
+                                    wind_speed: None,
+                                    drafting_factor: None,
+                                    grade: None,
+                                    rolling_resistance_coefficient: None,
+                                };
+
+                                if command_id == 49 {
+                                    command_status_data.target_power = Some(u16::from_le_bytes([
+                                        response_data[2],
+                                        response_data[3],
+                                    ]));
+                                }
+                                FitnessEquipmentData::CommandStatus(command_status_data)
+                            }
+                            v => FitnessEquipmentData::Common(v),
                         }
-                        _ => return Ok(()),
+                    } else {
+                        warn!("received unhandled data page: {:?}", data);
+                        return Ok(());
                     }
-                }
-                _ => {
-                    warn!("received unhandled data page: {:?}", data);
-                    return Ok(());
                 }
             };
 
@@ -336,6 +345,7 @@ pub enum FitnessEquipmentData {
     StationaryBikeTorque(TorqueData),
     Capabilities(CapabilitiesData),
     CommandStatus(CommandStatusData),
+    Common(message::common::DataPage),
 }
 
 #[cfg(test)]
@@ -531,6 +541,61 @@ mod test {
                 grade: None,
                 rolling_resistance_coefficient: None,
             })
+        );
+    }
+
+    #[test]
+    fn it_processes_page_80() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([80, 255, 255, 4, 9, 0, 65, 1]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver
+            .try_recv()
+            .expect("message should have been received");
+        assert_eq!(
+            data,
+            FitnessEquipmentData::Common(message::common::DataPage::ManufacturerInformation {
+                hardware_revision: 4,
+                manufacturer_id: 9,
+                model_number: 321,
+            }),
+        );
+    }
+
+    #[test]
+    fn it_processes_page_81() {
+        let payload = message::DataPayload {
+            channel: 0,
+            data: Some([81, 255, 31, 64, 1, 14, 51, 1]),
+            channel_id: None,
+            rssi: None,
+            rx_timestamp: None,
+        };
+
+        let (mut fe, receiver) = new_paired(DevicePairing {
+            device_id: 12345,
+            transmission_type: 0,
+        });
+        assert_eq!(fe.process_data(payload), Ok(()));
+        let data = receiver
+            .try_recv()
+            .expect("message should have been received");
+        assert_eq!(
+            data,
+            FitnessEquipmentData::Common(message::common::DataPage::ProductInformation {
+                software_revision: 6431,
+                serial_number: 20123137
+            }),
         );
     }
 }
