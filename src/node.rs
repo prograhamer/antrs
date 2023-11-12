@@ -23,6 +23,7 @@ pub enum Error {
     CapabilitiesNotInitialized,
     ExtendedMessagesNotSupported,
     ChannelDisconnected,
+    ChannelInvalidState,
 }
 
 impl From<rusb::Error> for Error {
@@ -75,6 +76,27 @@ struct ChannelAssignment {
     device: Option<Box<dyn device::DataProcessor + Send>>,
     status: ChannelStatus,
     events: Vec<MessageCode>,
+}
+
+/// Options to configure opened channels.
+///
+/// Note: if multiple channels are entering search mode, e.g. when opening multiple channels
+/// with paired devices, the channels will enter search sequentially. E.g. opening two channels
+/// both with search timeouts of 10 seconds, the first channel will close with search timeout
+/// after 10 seconds, and the second after 20 seconds (10 seconds after the first closed and the
+/// second entered search).
+pub struct ChannelOptions {
+    /// Timeout for low priority device search in 2.5 seconds increments, with special cases of
+    /// 0 meaning no low priority search and 255 meaning no timeout. If not specified, the device
+    /// default or previously set value will be used.
+    ///
+    /// If supported by the node, low priority search is performed before entering high priority
+    /// search. Low priority search will not interrupt other open channels while searching.
+    pub low_priority_search_timeout: Option<u8>,
+    /// Timeout for device search specified in 2.5 second increments, with special cases of
+    /// 0 meaning immediate timeout and 255 meaning no timeout. If not specified, the device
+    /// default or previously set value will be used.
+    pub search_timeout: Option<u8>,
 }
 
 pub struct Node {
@@ -204,6 +226,24 @@ impl Node {
         Ok(())
     }
 
+    pub fn free_channel(&mut self, channel: u8) -> Result<(), Error> {
+        let mut assigned = self.assigned.write().unwrap();
+
+        let ok = if let Some(assignment) = assigned.get(&channel) {
+            let assignment = assignment.lock().unwrap();
+            assignment.status == ChannelStatus::Closed
+        } else {
+            false
+        };
+
+        if ok {
+            assigned.remove(&channel);
+            Ok(())
+        } else {
+            Err(Error::ChannelInvalidState)
+        }
+    }
+
     pub fn channel_status(&self, channel: u8) -> Option<(ChannelStatus, Vec<MessageCode>)> {
         let assigned = self.assigned.read().unwrap();
         if let Some(assignment) = assigned.get(&channel) {
@@ -215,6 +255,7 @@ impl Node {
 
     pub fn search(
         &mut self,
+        options: Option<ChannelOptions>,
     ) -> Result<(u8, crossbeam_channel::Receiver<message::ChannelID>), Error> {
         let (search, receiver) = device::Search::new();
 
@@ -279,6 +320,34 @@ impl Node {
             || self.write_message(set_channel_rf_freq, Duration::from_millis(100)),
         )?;
 
+        if let Some(options) = options {
+            if let Some(timeout) = options.low_priority_search_timeout {
+                let search_timeout = Message::SetChannelLowPrioritySearchTimeout(
+                    message::SetChannelLowPrioritySearchTimeoutData { channel, timeout },
+                );
+                self.expect_channel_response_no_error_after(
+                    channel,
+                    MessageID::SetChannelLowPrioritySearchTimeout,
+                    Duration::from_millis(100),
+                    || self.write_message(search_timeout, Duration::from_millis(100)),
+                )?;
+            }
+
+            if let Some(timeout) = options.search_timeout {
+                let search_timeout =
+                    Message::SetChannelSearchTimeout(message::SetChannelSearchTimeoutData {
+                        channel,
+                        timeout,
+                    });
+                self.expect_channel_response_no_error_after(
+                    channel,
+                    MessageID::SetChannelSearchTimeout,
+                    Duration::from_millis(100),
+                    || self.write_message(search_timeout, Duration::from_millis(100)),
+                )?;
+            }
+        }
+
         let open_channel = Message::OpenChannel(message::OpenChannelData { channel });
         self.expect_channel_response_no_error_after(
             channel,
@@ -317,7 +386,11 @@ impl Node {
         Err(Error::NoAvailableChannel)
     }
 
-    pub fn assign_channel(&mut self, device: Box<dyn device::Device + Send>) -> Result<u8, Error> {
+    pub fn assign_channel(
+        &mut self,
+        device: Box<dyn device::Device + Send>,
+        options: Option<ChannelOptions>,
+    ) -> Result<u8, Error> {
         let channel = self._assign_channel(device.as_data_processor())?;
 
         let assign_channel = Message::AssignChannel(message::AssignChannelData {
@@ -371,6 +444,34 @@ impl Node {
             Duration::from_millis(100),
             || self.write_message(set_channel_rf_freq, Duration::from_millis(100)),
         )?;
+
+        if let Some(options) = options {
+            if let Some(timeout) = options.low_priority_search_timeout {
+                let search_timeout = Message::SetChannelLowPrioritySearchTimeout(
+                    message::SetChannelLowPrioritySearchTimeoutData { channel, timeout },
+                );
+                self.expect_channel_response_no_error_after(
+                    channel,
+                    MessageID::SetChannelLowPrioritySearchTimeout,
+                    Duration::from_millis(100),
+                    || self.write_message(search_timeout, Duration::from_millis(100)),
+                )?;
+            }
+
+            if let Some(timeout) = options.search_timeout {
+                let search_timeout =
+                    Message::SetChannelSearchTimeout(message::SetChannelSearchTimeoutData {
+                        channel,
+                        timeout,
+                    });
+                self.expect_channel_response_no_error_after(
+                    channel,
+                    MessageID::SetChannelSearchTimeout,
+                    Duration::from_millis(100),
+                    || self.write_message(search_timeout, Duration::from_millis(100)),
+                )?;
+            }
+        }
 
         let open_channel = Message::OpenChannel(message::OpenChannelData { channel });
         self.expect_channel_response_no_error_after(

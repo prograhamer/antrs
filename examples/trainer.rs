@@ -33,7 +33,7 @@ fn main() {
         device_id: 48585,
         transmission_type: 5,
     });
-    let channel = match node.assign_channel(Box::new(trainer)) {
+    let channel = match node.assign_channel(Box::new(trainer), None) {
         Ok(channel) => channel,
         Err(e) => panic!("failed to assign channel: {}", e),
     };

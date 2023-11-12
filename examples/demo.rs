@@ -31,13 +31,13 @@ fn main() -> Result<(), node::Error> {
         device_id: 47330,
         transmission_type: 1,
     });
-    node.assign_channel(Box::new(hrm))?;
+    node.assign_channel(Box::new(hrm), None)?;
 
     let (hrm, hrm_receiver2) = heart_rate_monitor::new_paired(antrs::device::DevicePairing {
         device_id: 34164,
         transmission_type: 81,
     });
-    node.assign_channel(Box::new(hrm))?;
+    node.assign_channel(Box::new(hrm), None)?;
 
     thread::spawn(move || loop {
         select! {
@@ -54,7 +54,7 @@ fn main() -> Result<(), node::Error> {
         }
     });
 
-    thread::sleep(Duration::from_secs(10));
+    thread::sleep(Duration::from_secs(45));
 
     node.close()?;
 

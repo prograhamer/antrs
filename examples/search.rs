@@ -1,6 +1,6 @@
 use std::thread;
 
-use antrs::node;
+use antrs::node::{self, ChannelOptions};
 use log::info;
 
 fn main() -> Result<(), node::Error> {
@@ -24,7 +24,12 @@ fn main() -> Result<(), node::Error> {
 
     node.open()?;
 
-    let (channel, receiver) = node.search()?;
+    let (channel, receiver) = node.search(Some(ChannelOptions {
+        // low priority for 30 seconds = 12 * 2.5
+        low_priority_search_timeout: Some(12),
+        // then high priority for 70 seconds = 28 * 2.5
+        search_timeout: Some(28),
+    }))?;
     info!("channel {} assigned for search", channel);
 
     let h = thread::spawn(move || {
