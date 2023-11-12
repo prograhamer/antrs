@@ -5,7 +5,7 @@ use log::info;
 
 fn main() -> Result<(), node::Error> {
     env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
     let key: [u8; 8] = match std::env::var("ANT_NETWORK_KEY") {
