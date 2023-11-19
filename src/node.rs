@@ -3,6 +3,7 @@ mod capabilities;
 use core::time::Duration;
 use log::{error, trace};
 use std::collections::{hash_map, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
@@ -60,6 +61,7 @@ struct Endpoint {
 }
 
 struct MessageNotifier {
+    id: u64,
     matcher: Box<dyn Fn(Message) -> bool + Send>,
     sender: crossbeam_channel::Sender<Message>,
 }
@@ -538,9 +540,14 @@ impl Node {
         &self,
         matcher: Box<dyn Fn(Message) -> bool + Send>,
     ) -> crossbeam_channel::Receiver<Message> {
+        static ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let id = ID_SEQ.fetch_add(1, Ordering::Relaxed);
+
         let (sender, receiver) = crossbeam_channel::bounded(1);
         let mut notifiers = self.notifiers.lock().unwrap();
         notifiers.push(MessageNotifier {
+            id,
             matcher,
             sender: sender.clone(),
         });
@@ -565,17 +572,16 @@ impl Node {
             let send_notifications = move |message| {
                 let mut notifiers = notifiers.lock().unwrap();
                 let mut to_delete = vec![];
-                for (index, notifier) in notifiers.iter().enumerate() {
+                for notifier in notifiers.iter() {
                     if (notifier.matcher)(message) {
-                        to_delete.push(index);
+                        to_delete.push(notifier.id);
                         if let Err(e) = notifier.sender.try_send(message) {
                             error!("failed to notify of message: {:?}: {}", message, e)
                         }
                     }
                 }
-                for index in to_delete {
-                    notifiers.swap_remove(index);
-                }
+
+                notifiers.retain(|n| !to_delete.contains(&n.id));
             };
 
             loop {
