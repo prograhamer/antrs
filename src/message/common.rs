@@ -1,3 +1,13 @@
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
+pub enum PageNumber {
+    CommandStatus = 71,
+    ManufacturerInformation = 80,
+    ProductInformation = 81,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DataPage {
     CommandStatus {
@@ -18,19 +28,19 @@ pub enum DataPage {
 }
 
 pub fn decode(data: [u8; 8]) -> Option<DataPage> {
-    match data[0] {
-        71 => Some(DataPage::CommandStatus {
+    match TryInto::<PageNumber>::try_into(data[0]) {
+        Ok(PageNumber::CommandStatus) => Some(DataPage::CommandStatus {
             command_id: data[1],
             sequence_no: data[2],
             command_status: super::CommandStatus::try_from(data[3]).ok()?,
             response_data: [data[4], data[5], data[6], data[7]],
         }),
-        80 => Some(DataPage::ManufacturerInformation {
+        Ok(PageNumber::ManufacturerInformation) => Some(DataPage::ManufacturerInformation {
             hardware_revision: data[3],
             manufacturer_id: u16::from_le_bytes([data[4], data[5]]),
             model_number: u16::from_le_bytes([data[6], data[7]]),
         }),
-        81 => {
+        Ok(PageNumber::ProductInformation) => {
             let mut software_revision = Into::<u16>::into(data[3]) * 100;
             if data[2] != 0xff {
                 software_revision += Into::<u16>::into(data[2]);
@@ -41,6 +51,6 @@ pub fn decode(data: [u8; 8]) -> Option<DataPage> {
                 serial_number: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
             })
         }
-        _ => None,
+        Err(_) => None,
     }
 }

@@ -525,7 +525,7 @@ impl Node {
         }
     }
 
-    fn wait_for_message_after<T, F: FnOnce() -> Result<T, Error>>(
+    pub fn wait_for_message_after<T, F: FnOnce() -> Result<T, Error>>(
         &self,
         matcher: Box<dyn Fn(Message) -> bool + Send>,
         timeout: Duration,

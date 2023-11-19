@@ -1,8 +1,16 @@
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::device::{DataProcessor, Device, DevicePairing, Error};
 use crate::message;
 use log::warn;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
+pub enum Command {
+    TargetPower = 49,
+    WindResistance = 50,
+    TrackResistance = 51,
+}
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, TryFromPrimitive)]
@@ -76,7 +84,16 @@ pub fn target_power_message(channel: u8, power: u16) -> message::Message {
 
     message::Message::AcknowledgedData(message::DataPayload {
         channel,
-        data: Some([0x31, 0xff, 0xff, 0xff, 0xff, 0xff, power_lsb, power_msb]),
+        data: Some([
+            Command::TargetPower.into(),
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            power_lsb,
+            power_msb,
+        ]),
         channel_id: None,
         rssi: None,
         rx_timestamp: None,
@@ -101,7 +118,7 @@ pub fn track_resistance_message(
     message::Message::AcknowledgedData(message::DataPayload {
         channel,
         data: Some([
-            0x33,
+            Command::TrackResistance.into(),
             0xff,
             0xff,
             0xff,
@@ -137,7 +154,7 @@ pub fn wind_resistance_message(
     message::Message::AcknowledgedData(message::DataPayload {
         channel,
         data: Some([
-            0x32,
+            Command::WindResistance.into(),
             0xff,
             0xff,
             0xff,
@@ -316,12 +333,12 @@ impl DataProcessor for FitnessEquipment {
                                     rolling_resistance_coefficient: None,
                                 };
 
-                                if command_id == 49 {
+                                if command_id == Command::TargetPower.into() {
                                     command_status_data.target_power = Some(u16::from_le_bytes([
                                         response_data[2],
                                         response_data[3],
                                     ]));
-                                } else if command_id == 50 {
+                                } else if command_id == Command::WindResistance.into() {
                                     command_status_data.wind_resistance_coefficient =
                                         Some(response_data[1]);
                                     command_status_data.wind_speed = Some(response_data[2]);
@@ -427,13 +444,9 @@ pub enum FitnessEquipmentData {
 
 #[cfg(test)]
 mod test {
-    use super::{
-        new_paired, EquipmentState, EquipmentType, FitnessEquipmentData, GeneralData, HRDataSource,
-        StationaryBikeData, TargetPowerStatus, TorqueData,
-    };
     use crate::device::{DataProcessor, DevicePairing};
     use crate::message::{self, CommandStatus};
-    use crate::profile::fitness_equipment::{CapabilitiesData, CommandStatusData};
+    use crate::profile::fitness_equipment::*;
 
     #[test]
     fn it_processes_page_16() {
@@ -607,7 +620,7 @@ mod test {
         assert_eq!(
             data,
             FitnessEquipmentData::CommandStatus(CommandStatusData {
-                command_id: 49,
+                command_id: Command::TargetPower.into(),
                 sequence_no: 1,
                 command_status: CommandStatus::Pass,
                 total_resistance: None,
@@ -640,7 +653,7 @@ mod test {
         assert_eq!(
             data,
             FitnessEquipmentData::CommandStatus(CommandStatusData {
-                command_id: 50,
+                command_id: Command::WindResistance.into(),
                 sequence_no: 1,
                 command_status: CommandStatus::Pass,
                 total_resistance: None,
